@@ -1,0 +1,9 @@
+[options]
+kvm = enabled
+slirp = enabled
+docs = disabled
+plugins = true
+
+[properties]
+native_file = ['/home/hyunil/Desktop/SKKU_PA/2025/semester2/SA/Lab/FEMU/build-femu/config-meson.cross']
+
