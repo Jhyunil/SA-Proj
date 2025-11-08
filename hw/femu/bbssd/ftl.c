@@ -389,6 +389,10 @@ void ssd_init(FemuCtrl *n)
 
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
+
+    // FEMU Intor & Add Command
+    ssd->host_writes = 0;
+    ssd->gc_writes = 0;
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)
@@ -690,6 +694,8 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 /* here ppa identifies the block we want to clean */
 static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
+    femu_log("one block copy triggered!\n");
+
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
@@ -703,6 +709,8 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
             gc_read_page(ssd, ppa);
             /* delay the maptbl update until "write" happens */
             gc_write_page(ssd, ppa);
+            // FEMU Intro & Add Command
+            ssd->gc_writes++;
             cnt++;
         }
     }
@@ -853,6 +861,9 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         /* get latency statistics */
         curlat = ssd_advance_status(ssd, &ppa, &swr);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
+
+        // FEMU Intro & Add Command
+        ssd->host_writes++;
     }
 
     return maxlat;
@@ -942,7 +953,7 @@ static uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 }
 
 static void *ftl_thread(void *arg)
-{
+{ //  FTL thread (FEMU Intro slide 11 page)
     FemuCtrl *n = (FemuCtrl *)arg;
     struct ssd *ssd = n->ssd;
     NvmeRequest *req = NULL;
@@ -963,7 +974,7 @@ static void *ftl_thread(void *arg)
             if (!ssd->to_ftl[i] || !femu_ring_count(ssd->to_ftl[i]))
                 continue;
 
-            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1);
+            rc = femu_ring_dequeue(ssd->to_ftl[i], (void *)&req, 1); // femu ring
             if (rc != 1) {
                 printf("FEMU: FTL to_ftl dequeue failed\n");
             }
@@ -989,7 +1000,7 @@ static void *ftl_thread(void *arg)
             req->reqlat = lat;
             req->expire_time += lat;
 
-            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1);
+            rc = femu_ring_enqueue(ssd->to_poller[i], (void *)&req, 1); // cq
             if (rc != 1) {
                 ftl_err("FTL to_poller enqueue failed\n");
             }
