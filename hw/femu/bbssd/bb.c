@@ -101,11 +101,6 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 
 static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
 {
-
-    // ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
-    // if (!ret) {
-    //     return NVME_SUCCESS;
-    // }
     uint8_t lid = (uint8_t)(cmd->cdw10 & 0xFF);   // DW10[7:0] = LID
     if (lid != 0x17) {
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -139,4 +134,3 @@ int nvme_register_bbssd(FemuCtrl *n)
 
     return 0;
 }
-
