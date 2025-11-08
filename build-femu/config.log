@@ -1,4 +1,4 @@
-# QEMU configure log 2025. 11. 08. (토) 10:27:54 KST
+# QEMU configure log 2025. 11. 08. (토) 15:45:17 KST
 # Configured with: '../configure' '--enable-kvm' '--target-list=x86_64-softmmu' '--enable-slirp'
 
 #
