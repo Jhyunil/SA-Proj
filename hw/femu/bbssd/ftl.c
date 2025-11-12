@@ -694,7 +694,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
 /* here ppa identifies the block we want to clean */
 static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 {
-    femu_log("one block copy triggered!\n");
+    // femu_log("one block copy triggered!\n");
 
     struct ssdparams *spp = &ssd->sp;
     struct nand_page *pg_iter = NULL;

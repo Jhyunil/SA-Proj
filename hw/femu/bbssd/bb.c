@@ -108,7 +108,7 @@ static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
 
     struct ssd* ssd = n->ssd;
     uint64_t waf = nvme_write_amplification(ssd->host_writes, ssd->gc_writes);
-    femu_log("waf : %ld\n", waf);
+    // femu_log("waf : %ld\n", waf);
 
     // uint8_t list[NVME_IDENTIFY_DATA_SIZE] = {};
     // list[22] = waf;
