@@ -1,5 +1,289 @@
 #include "ftl.h"
 
+// FEMU CDFTL
+
+/*** Translation Flash Space ***/
+#define INVALID_PPN 0xFFFFFFFF
+Page* tnand;
+uint8_t* is_w;
+size_t NBANKS, NBLKS, NPAGES, PAGES_PER_BANK;
+
+int tnand_init(int nbanks, int nblks, int npages)
+{
+	if((nbanks <= 0 || nblks <= 0) || npages <= 0) return NAND_ERR_INVALID;
+
+	size_t tmp, total_pages;
+	tmp = (size_t)nbanks * (size_t)nblks;
+	if(tmp > SIZE_MAX / (size_t)npages) return NAND_ERR_INVALID;
+	total_pages = tmp * (size_t)npages;
+
+	tnand = (Page*)calloc(total_pages, sizeof(Page));
+	is_w = (uint8_t*)calloc(total_pages, sizeof(uint8_t));
+	if(!tnand || !is_w) { free(tnand); free(is_w); return NAND_ERR_INVALID; }
+
+	NBANKS = (size_t)nbanks;
+	NBLKS = (size_t)nblks;
+	NPAGES = (size_t)npages;
+	PAGES_PER_BANK = NBLKS * NPAGES;
+	
+    // femu_log("\n\n\nTranslation Space1 : %d\n\n\n", (int)(total_pages * sizeof(Page)));
+    // FILE *fp = fopen("/home/femu/translation_space.txt", "w");
+    // if (fp == NULL) {
+    //     femu_err("Failed to create translation_space.txt\n");
+    //     return NAND_ERR_INVALID;
+    // }
+    // fprintf(fp, "Translation Space Size: %zu bytes\n", total_pages * sizeof(Page));
+    // fclose(fp);
+
+	return NAND_SUCCESS;
+}
+
+int tnand_write(int bank, int blk, int page, void *data)
+{
+	int flag_bk, flag_bl, flag_pg; 
+	flag_bk = flag_bl = flag_pg = 0;
+	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
+
+	if(bank < 0 || bank >= NBANKS) flag_bk++;
+	if(blk < 0 || blk >= NBLKS) flag_bl++;
+	if(page < 0 || page >= NPAGES) flag_pg++;
+	if((flag_bk || flag_bl) || flag_pg) return NAND_ERR_INVALID;
+	if(is_w[flat_idx]) return NAND_ERR_OVERWRITE;
+	if(page && !is_w[flat_idx-1]) return NAND_ERR_POSITION;
+
+
+	memcpy(tnand[flat_idx].data, data, PAGE_DATA_SIZE * sizeof(uint8_t));
+	// memcpy(tnand[flat_idx].spare, spare, PAGE_SPARE_SIZE * sizeof(uint8_t));
+	is_w[flat_idx] = 1;
+
+	return NAND_SUCCESS;
+}
+
+int tnand_read(int bank, int blk, int page, void *data)
+{
+	int flag_bk, flag_bl, flag_pg;
+	flag_bk = flag_bl = flag_pg = 0;
+	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
+
+	if(bank < 0 || bank >= NBANKS) flag_bk++;
+	if(blk < 0 || blk >= NBLKS) flag_bl++;
+	if(page < 0 || page >= NPAGES) flag_pg++;
+	if((flag_bk || flag_bl) || flag_pg) return NAND_ERR_INVALID;
+	if(!is_w[flat_idx]) return NAND_ERR_EMPTY;
+
+	memcpy(data, tnand[flat_idx].data, PAGE_DATA_SIZE * sizeof(uint8_t));
+	// memcpy(spare, tnand[flat_idx].spare, PAGE_SPARE_SIZE * sizeof(uint8_t));
+
+	return NAND_SUCCESS;
+}
+
+int tnand_erase(int bank, int blk)
+{
+	int flag_bk, flag_bl, flag_em; 
+	flag_bk = flag_bl = flag_em = 0;
+	size_t flat_b_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)); // block idx
+	size_t flat_idx = 0;
+
+	if(bank < 0 || bank >= NBANKS) flag_bk++;
+	if(blk < 0 || blk >= NBLKS) flag_bl++;
+	if(flag_bk || flag_bl) return NAND_ERR_INVALID;
+
+	for(int i = 0; i < NPAGES; i++) {
+		flat_idx = flat_b_idx + i;
+		flag_em += is_w[flat_idx];
+		is_w[flat_idx] = 0;
+	}
+	if(!flag_em) return NAND_ERR_EMPTY;
+
+	return NAND_SUCCESS;
+}
+/*** Translation Flash Space ***/
+
+/*** Free T Block List (FIFO Queue) ***/
+Queuetype* create_queue(void)
+{
+	return (Queuetype*)malloc(sizeof(Queuetype));
+}
+
+void init_queue(Queuetype* h)
+{
+	h->cap = 16 + 1;
+	h->queue = (int*)malloc(sizeof(int) * h->cap);
+	h->head = 0;
+	h->tail = 0;
+	h->q_size = 0;
+}
+
+int is_full(const Queuetype* h)
+{
+	return h->q_size == (h->cap - 1);
+}
+
+int is_empty(const Queuetype* h)
+{
+	return h->q_size == 0;
+}
+
+void enqueue(Queuetype* h, int item)
+{
+	if (is_full(h)) {
+		fprintf(stderr, "queue is full!\n");
+		return;
+	}
+	h->queue[h->tail] = item;
+	h->tail = (h->tail + 1) % h->cap;
+	h->q_size++;
+}
+
+int dequeue(Queuetype* h)
+{
+	if (is_empty(h)) {
+		fprintf(stderr, "queue is empty!\n");
+		return INVALID_PPN;
+	}
+	int item = h->queue[h->head];
+	h->head = (h->head + 1) % h->cap;
+	h->q_size--;
+	return item;
+}
+Queuetype* fblk_list; // free block for Write
+int blk_invalid[16];  // 각 T Block 별 invalid page 수
+/*** Free T Block List (FIFO Queue) ***/
+
+// cmt LRU 리스트 관련 함수
+void cmt_lru_list_init(cmt_lru_list *list) {
+    list->head = NULL;
+    list->tail = NULL;
+}
+
+void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry) {
+    if (entry->lru_prev) {
+        // entry가 head가 아닌 경우
+        entry->lru_prev->lru_next = entry->lru_next;
+    } else {
+        // entry가 head인 경우: head를 다음 노드로 업데이트
+        list->head = entry->lru_next;
+    }
+
+    if (entry->lru_next) {
+        // entry가 tail이 아닌 경우
+        entry->lru_next->lru_prev = entry->lru_prev;
+    } else {
+        // entry가 tail인 경우: tail을 이전 노드로 업데이트
+        list->tail = entry->lru_prev;
+    }
+
+    // 제거된 노드의 포인터는 NULL로 정리 (안전성)
+    entry->lru_prev = NULL;
+    entry->lru_next = NULL;
+}
+
+void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
+    entry->lru_next = list->head; // 새 노드의 next는 현재 head
+    entry->lru_prev = NULL;       // 새 노드는 head가 되므로 prev는 NULL
+
+    if (list->head) {
+        list->head->lru_prev = entry; // 기존 head의 prev를 새 노드로
+    }
+    list->head = entry; // 리스트의 head를 새 노드로 업데이트
+
+    if (list->tail == NULL) {
+        // 리스트가 비어있었다면 tail도 새 노드로 설정
+        list->tail = entry;
+    }
+}
+
+void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
+    if (list->head == entry) {
+        // 이미 head(MRU)에 있으므로 아무것도 하지 않음
+        return;
+    }
+    
+    // 1. 리스트에서 먼저 제거
+    cmt_lru_list_remove(list, entry);
+    // 2. 리스트의 맨 앞에 다시 추가
+    cmt_lru_list_add_to_front(list, entry);
+}
+
+struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list) {
+    if (list->tail == NULL) {
+        // 리스트가 비어있음
+        return NULL;
+    }
+
+    struct cmt_entry *victim = list->tail;
+    cmt_lru_list_remove(list, victim);
+    
+    return victim;
+}
+
+// ctp LRU 리스트 관련 함수
+void ctp_lru_list_init(ctp_lru_list *list) {
+    list->head = NULL;
+    list->tail = NULL;
+}
+
+void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry) {
+    if (entry->lru_prev) {
+        // entry가 head가 아닌 경우
+        entry->lru_prev->lru_next = entry->lru_next;
+    } else {
+        // entry가 head인 경우: head를 다음 노드로 업데이트
+        list->head = entry->lru_next;
+    }
+
+    if (entry->lru_next) {
+        // entry가 tail이 아닌 경우
+        entry->lru_next->lru_prev = entry->lru_prev;
+    } else {
+        // entry가 tail인 경우: tail을 이전 노드로 업데이트
+        list->tail = entry->lru_prev;
+    }
+
+    // 제거된 노드의 포인터는 NULL로 정리
+    entry->lru_prev = NULL;
+    entry->lru_next = NULL;
+}
+
+void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
+    entry->lru_next = list->head; // 새 노드의 next는 현재 head
+    entry->lru_prev = NULL;       // 새 노드는 head가 되므로 prev는 NULL
+
+    if (list->head) {
+        list->head->lru_prev = entry; // 기존 head의 prev를 새 노드로
+    }
+    list->head = entry; // 리스트의 head를 새 노드로 업데이트
+
+    if (list->tail == NULL) {
+        // 리스트가 비어있었다면 tail도 새 노드로 설정
+        list->tail = entry;
+    }
+}
+
+void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
+    if (list->head == entry) {
+        // 이미 head(MRU)에 있으므로 아무것도 하지 않음
+        return;
+    }
+    
+    // 1. 리스트에서 먼저 제거
+    ctp_lru_list_remove(list, entry);
+    // 2. 리스트의 맨 앞에 다시 추가
+    ctp_lru_list_add_to_front(list, entry);
+}
+
+struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list) {
+    if (list->tail == NULL) {
+        // 리스트가 비어있음
+        return NULL;
+    }
+
+    struct ctp_entry *victim = list->tail;
+    ctp_lru_list_remove(list, victim);
+    
+    return victim;
+}
+
 //#define FEMU_DEBUG_FTL
 
 static void *ftl_thread(void *arg);
@@ -390,9 +674,19 @@ void ssd_init(FemuCtrl *n)
     qemu_thread_create(&ssd->ftl_thread, "FEMU-FTL-Thread", ftl_thread, n,
                        QEMU_THREAD_JOINABLE);
 
-    // FEMU Intor & Add Command
+    // FEMU Intro & Add Command
     ssd->host_writes = 0;
     ssd->gc_writes = 0;
+
+    // FEMU CDFTL
+    spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
+    tnand_init(1, 16, spp->pgs_per_blk);
+    fblk_list = create_queue(); // Free Translation Block List (FIFO)
+    init_queue(fblk_list);
+    for(int j = 0; j < 16; j++) {
+        enqueue(fblk_list, j);
+        blk_invalid[j] = 0;
+	}
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)

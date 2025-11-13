@@ -108,6 +108,7 @@ static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
 
     struct ssd* ssd = n->ssd;
     uint64_t waf = nvme_write_amplification(ssd->host_writes, ssd->gc_writes);
+    // femu_log("tspace_size: %d\n",ssd->sp.tspace_size);
     // femu_log("waf : %ld\n", waf);
 
     // uint8_t list[NVME_IDENTIFY_DATA_SIZE] = {};

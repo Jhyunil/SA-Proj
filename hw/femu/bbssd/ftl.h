@@ -154,6 +154,9 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+
+    // FEMU CDFTL
+    int tspace_size; /* translation space size in pages */
 };
 
 typedef struct line {
@@ -239,3 +242,106 @@ void ssd_init(FemuCtrl *n);
 #endif
 
 #endif
+
+// FEMU CDFTL
+struct map_page {
+    struct ppa *dppn;
+};
+
+struct gtd_entry {
+    struct ppa tppn;
+    bool location;
+    bool dirty;
+};
+
+struct cmt_entry {
+    struct data {
+        uint64_t dlpn;
+        struct ppa dppn;
+        bool dirty;
+    } data;
+    struct cmt_entry *prev;
+    struct cmt_entry *next;
+    struct cmt_entry *lru_prev;
+    struct cmt_entry *lru_next;
+};
+
+struct cmt_hash {
+    uint64_t hash_value;
+    struct cmt_entry *cmt_entries;
+    struct cmt_hash *hash_next;
+};
+
+typedef struct {
+    struct cmt_entry *head; // MRU (Most Recently Used) - 리스트의 맨 앞
+    struct cmt_entry *tail; // LRU (Least Recently Used) - 리스트의 맨 뒤
+} cmt_lru_list;
+
+// CMT LRU List Functions
+void cmt_lru_list_init(cmt_lru_list *list);
+void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry);
+void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry);
+void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry);
+struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list);
+
+struct ctp_entry {
+    uint64_t tvpn;
+    struct map_page *mp;
+    struct ppa tppn;
+    struct ctp_entry *prev;
+    struct ctp_entry *next;
+    struct ctp_entry *lru_prev;
+    struct ctp_entry *lru_next;
+};
+
+struct ctp_hash {
+    uint64_t hash_value;
+    struct ctp_entry *ctp_entries;
+    struct ctp_hash *hash_next;
+};
+
+typedef struct {
+    struct ctp_entry *head; // MRU (Most Recently Used) - 리스트의 맨 앞
+    struct ctp_entry *tail; // LRU (Least Recently Used) - 리스트의 맨 뒤
+} ctp_lru_list;
+
+// CTP LRU List Functions
+void ctp_lru_list_init(ctp_lru_list *list);
+void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry);
+void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry);
+void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry);
+struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list);
+
+/*** Translation Flash Space ***/
+#define PAGE_DATA_SIZE 4096
+/* function prototypes */
+int tnand_init(int nbanks, int nblks, int npages);
+int tnand_read(int bank, int blk, int page, void *data);
+int tnand_write(int bank, int blk, int page, void *data);
+int tnand_erase(int bank, int blk);
+
+/* return code */
+#define NAND_SUCCESS        0
+#define NAND_ERR_INVALID	-1
+#define NAND_ERR_OVERWRITE	-2
+#define NAND_ERR_POSITION	-3
+#define NAND_ERR_EMPTY		-4
+
+typedef struct _Page {
+	uint8_t data[PAGE_DATA_SIZE];
+} Page;
+
+/*** Free T Block List (FIFO Queue) ***/
+typedef struct {
+	int* queue;
+	int head;       // front
+	int tail;       // rear
+	int cap;        // buffer capacity
+	int q_size;  // current size
+} Queuetype;
+Queuetype* create_queue(void);
+void init_queue(Queuetype* h);
+int is_full(const Queuetype* h);
+int is_empty(const Queuetype* h);
+void enqueue(Queuetype* h, int item);
+int dequeue(Queuetype* h);
