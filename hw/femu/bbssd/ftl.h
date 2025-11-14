@@ -277,13 +277,6 @@ typedef struct {
     struct cmt_entry *tail; // LRU (Least Recently Used) - 리스트의 맨 뒤
 } cmt_lru_list;
 
-// CMT LRU List Functions
-void cmt_lru_list_init(cmt_lru_list *list);
-void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry);
-void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry);
-void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry);
-struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list);
-
 struct ctp_entry {
     uint64_t tvpn;
     struct map_page *mp;
@@ -305,12 +298,38 @@ typedef struct {
     struct ctp_entry *tail; // LRU (Least Recently Used) - 리스트의 맨 뒤
 } ctp_lru_list;
 
+// gtd, cmt, ctp
+#define MAX_TPPN 3072
+#define MAX_TVPN 3072
+#define NUM_CMT_BUCKETS 10
+#define NUM_CTP_BUCKETS 5
+
+// gtd, cmt, ctp manipulate functions
+struct cmt_entry* cmt_find_entry(uint64_t dlpn);
+struct ctp_entry* ctp_find_entry(uint64_t tvpn);
+
+void tinit(void);
+void gtd_init(void);
+void cmt_init(void);
+void ctp_init(void);
+
+// CMT LRU List Functions
+void cmt_lru_list_init(cmt_lru_list *list);
+void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry);
+void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry);
+void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry);
+struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list);
+
+
 // CTP LRU List Functions
 void ctp_lru_list_init(ctp_lru_list *list);
 void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list);
+
+void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn);
+void replace(uint64_t dlpn, uint64_t dppn);
 
 /*** Translation Flash Space ***/
 #define PAGE_DATA_SIZE 4096

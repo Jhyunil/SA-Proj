@@ -8,6 +8,11 @@ Page* tnand;
 uint8_t* is_w;
 size_t NBANKS, NBLKS, NPAGES, PAGES_PER_BANK;
 
+uint64_t tp2l[MAX_TPPN];
+struct gtd_entry gtd[MAX_TVPN];
+struct cmt_hash cmt[NUM_CMT_BUCKETS];
+struct ctp_hash ctp[NUM_CTP_BUCKETS];
+
 int tnand_init(int nbanks, int nblks, int npages)
 {
 	if((nbanks <= 0 || nblks <= 0) || npages <= 0) return NAND_ERR_INVALID;
@@ -150,13 +155,15 @@ Queuetype* fblk_list; // free block for Write
 int blk_invalid[16];  // 각 T Block 별 invalid page 수
 /*** Free T Block List (FIFO Queue) ***/
 
-// cmt LRU 리스트 관련 함수
-void cmt_lru_list_init(cmt_lru_list *list) {
+/*** cmt LRU 리스트 관련 함수 ***/
+void cmt_lru_list_init(cmt_lru_list *list) 
+{
     list->head = NULL;
     list->tail = NULL;
 }
 
-void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry) {
+void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry) 
+{
     if (entry->lru_prev) {
         // entry가 head가 아닌 경우
         entry->lru_prev->lru_next = entry->lru_next;
@@ -178,7 +185,8 @@ void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry) {
     entry->lru_next = NULL;
 }
 
-void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
+void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry) 
+{ // most recent accessed
     entry->lru_next = list->head; // 새 노드의 next는 현재 head
     entry->lru_prev = NULL;       // 새 노드는 head가 되므로 prev는 NULL
 
@@ -193,7 +201,8 @@ void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
     }
 }
 
-void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
+void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry) 
+{
     if (list->head == entry) {
         // 이미 head(MRU)에 있으므로 아무것도 하지 않음
         return;
@@ -205,7 +214,8 @@ void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry) {
     cmt_lru_list_add_to_front(list, entry);
 }
 
-struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list) {
+struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list) 
+{
     if (list->tail == NULL) {
         // 리스트가 비어있음
         return NULL;
@@ -218,12 +228,14 @@ struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list) {
 }
 
 // ctp LRU 리스트 관련 함수
-void ctp_lru_list_init(ctp_lru_list *list) {
+void ctp_lru_list_init(ctp_lru_list *list) 
+{
     list->head = NULL;
     list->tail = NULL;
 }
 
-void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry) {
+void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry) 
+{
     if (entry->lru_prev) {
         // entry가 head가 아닌 경우
         entry->lru_prev->lru_next = entry->lru_next;
@@ -245,7 +257,8 @@ void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry) {
     entry->lru_next = NULL;
 }
 
-void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
+void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry) 
+{
     entry->lru_next = list->head; // 새 노드의 next는 현재 head
     entry->lru_prev = NULL;       // 새 노드는 head가 되므로 prev는 NULL
 
@@ -260,7 +273,8 @@ void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
     }
 }
 
-void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
+void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry) 
+{
     if (list->head == entry) {
         // 이미 head(MRU)에 있으므로 아무것도 하지 않음
         return;
@@ -272,7 +286,8 @@ void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry) {
     ctp_lru_list_add_to_front(list, entry);
 }
 
-struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list) {
+struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list) 
+{
     if (list->tail == NULL) {
         // 리스트가 비어있음
         return NULL;
@@ -283,6 +298,82 @@ struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list) {
     
     return victim;
 }
+
+struct cmt_entry* cmt_find_entry(uint64_t dlpn)
+{
+    int hash_key = dlpn % NUM_CMT_BUCKETS;
+
+
+    struct cmt_entry* ptr = cmt[hash_key].cmt_entries;
+    while(ptr != NULL && ptr->data.dlpn != dlpn) {
+        ptr = ptr->next;
+    }
+
+    return ptr;
+}
+
+struct ctp_entry* ctp_find_entry(uint64_t tvpn)
+{
+    int hash_key = tvpn % NUM_CTP_BUCKETS;
+
+
+    struct ctp_entry* ptr = ctp[hash_key].ctp_entries;
+    while(ptr != NULL && ptr->tvpn != tvpn) {
+        ptr = ptr->next;
+    }
+
+    return ptr;
+}
+
+void tinit(void)
+{
+    gtd_init();
+    cmt_init();
+    ctp_init();
+}
+
+void gtd_init(void)
+{ // initialize gtd and tp2l
+    for(int i = 0; i < MAX_TVPN; i++) {
+        gtd[i].tppn.ppa = INVALID_PPN; 
+        gtd[i].location = true;
+        gtd[i].dirty = false;
+    }
+
+    for(int i = 0; i < MAX_TPPN; i++) {
+        tp2l[i] = INVALID_PPN;
+    }
+}
+
+void cmt_init(void)
+{
+    for(int i = 0; i < NUM_CMT_BUCKETS; i++) {
+        cmt[i].hash_value = i;
+        cmt[i].cmt_entries = NULL;
+        cmt[i].hash_next = (i != NUM_CMT_BUCKETS-1) ? &cmt[i+1] : NULL;
+    }
+}
+
+void ctp_init(void)
+{
+    for(int i = 0; i < NUM_CTP_BUCKETS; i++) {
+        ctp[i].hash_value = i;
+        ctp[i].ctp_entries = NULL;
+        ctp[i].hash_next = (i != NUM_CTP_BUCKETS-1) ? &ctp[i+1] : NULL;
+    }
+}
+
+void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
+{ // Hyunil
+
+}
+
+void replace(uint64_t dlpn, uint64_t dppn)
+{ // Donghyun
+
+}
+
+/*** cmt LRU 리스트 관련 함수 ***/
 
 //#define FEMU_DEBUG_FTL
 
@@ -679,6 +770,7 @@ void ssd_init(FemuCtrl *n)
     ssd->gc_writes = 0;
 
     // FEMU CDFTL
+    // Translation Space Allocation
     spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
     tnand_init(1, 16, spp->pgs_per_blk);
     fblk_list = create_queue(); // Free Translation Block List (FIFO)
@@ -687,6 +779,8 @@ void ssd_init(FemuCtrl *n)
         enqueue(fblk_list, j);
         blk_invalid[j] = 0;
 	}
+    // Translation Metadata Allocation
+    tinit();
 }
 
 static inline bool valid_ppa(struct ssd *ssd, struct ppa *ppa)

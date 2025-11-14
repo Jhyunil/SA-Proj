@@ -1,5 +1,11 @@
 {
     "files.associations": {
-        "nvme.h": "c"
+        "nvme.h": "c",
+        "*.inc": "c",
+        "*.idef": "c",
+        "*.def": "c",
+        "compare": "c",
+        "cstdint": "c",
+        "format": "c"
     }
 }
