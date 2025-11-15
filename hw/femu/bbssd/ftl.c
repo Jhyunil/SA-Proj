@@ -389,6 +389,8 @@ void replace(uint64_t dlpn, uint64_t dppn)
 
         ptr->ppa = dppn;
 
+        ctp_lru_list_move_to_front(&ctp_lru, _ctp_entry); // ?
+
         struct cmt_entry* _cmt_entry = cmt_find_entry(dlpn);
 
         // CMT Hit
@@ -418,7 +420,42 @@ void replace(uint64_t dlpn, uint64_t dppn)
     // CTP Miss
     else {
         struct cmt_entry* _cmt_entry = cmt_find_entry(dlpn);
+
+        // CMT Hit
+        if (_cmt_entry != NULL) {
+            _cmt_entry->data.dppn.ppa = dppn;
+            _cmt_entry->data.dirty = true;
+
+            cmt_lru_list_move_to_front(&cmt_lru, _cmt_entry); // ?
+        }
+
+        // CMT Miss
+        else {
+            fetch_in(dlpn, dppn, tvpn);
+
+            _ctp_entry = ctp_find_entry(tvpn);
+
+            if (_ctp_entry == NULL) {
+                femu_log("CTP entry fetch failed!\n");
+            }
+
+            struct ppa* ptr = _ctp_entry->mp->dppn;
+
+            for (int i = 0; i < dlpn % 512; i++) {
+                ptr++;
+            }
+
+            ptr->ppa = dppn;
+
+            ctp_lru_list_move_to_front(&ctp_lru, _ctp_entry); // ?
+        }
     }
+    
+    // update gtd(location, dirty)
+    // location은 아마도 fetch_in에서 clear
+    gtd[tvpn].dirty = true;
+
+    return;
 }
 
 /*** cmt LRU 리스트 관련 함수 ***/
