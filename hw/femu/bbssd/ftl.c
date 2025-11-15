@@ -12,6 +12,8 @@ uint64_t tp2l[MAX_TPPN];
 struct gtd_entry gtd[MAX_TVPN];
 struct cmt_hash cmt[NUM_CMT_BUCKETS];
 struct ctp_hash ctp[NUM_CTP_BUCKETS];
+ctp_lru_list _ctp_lru_list;
+cmt_lru_list _cmt_lru_list;
 
 int tnand_init(int nbanks, int nblks, int npages)
 {
@@ -352,6 +354,8 @@ void cmt_init(void)
         cmt[i].cmt_entries = NULL;
         cmt[i].hash_next = (i != NUM_CMT_BUCKETS-1) ? &cmt[i+1] : NULL;
     }
+
+    cmt_lru_list_init(&_cmt_lru_list);
 }
 
 void ctp_init(void)
@@ -361,6 +365,8 @@ void ctp_init(void)
         ctp[i].ctp_entries = NULL;
         ctp[i].hash_next = (i != NUM_CTP_BUCKETS-1) ? &ctp[i+1] : NULL;
     }
+
+    ctp_lru_list_init(&_ctp_lru_list);
 }
 
 void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
@@ -370,7 +376,31 @@ void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
 
 void replace(uint64_t dlpn, uint64_t dppn)
 { // Donghyun
+    uint64_t tvpn = dlpn / 512;
+    struct ctp_entry* _ctp_entry = ctp_find_entry(tvpn);
 
+    // CTP Hit
+    if (_ctp_entry != NULL) {
+        struct ppa* ptr = _ctp_entry->mp->dppn;
+
+        for (int i = 0; i < dlpn % 512; i++) {
+            ptr++;
+        }
+
+        ptr->ppa = dppn;
+
+        struct cmt_entry* _cmt_entry = cmt_find_entry(dlpn);
+
+        // CMT Hit
+        if (_cmt_entry != NULL) {
+            cmt_lru_list_remove(&_cmt_lru_list, _cmt_entry);
+            // free(_cmt_entry);
+        }
+    }
+
+    else {
+
+    }
 }
 
 /*** cmt LRU 리스트 관련 함수 ***/
