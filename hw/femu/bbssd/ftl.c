@@ -12,8 +12,8 @@ uint64_t tp2l[MAX_TPPN];
 struct gtd_entry gtd[MAX_TVPN];
 struct cmt_hash cmt[NUM_CMT_BUCKETS];
 struct ctp_hash ctp[NUM_CTP_BUCKETS];
-ctp_lru_list _ctp_lru_list;
-cmt_lru_list _cmt_lru_list;
+ctp_lru_list ctp_lru;
+cmt_lru_list cmt_lru;
 
 int tnand_init(int nbanks, int nblks, int npages)
 {
@@ -355,7 +355,7 @@ void cmt_init(void)
         cmt[i].hash_next = (i != NUM_CMT_BUCKETS-1) ? &cmt[i+1] : NULL;
     }
 
-    cmt_lru_list_init(&_cmt_lru_list);
+    cmt_lru_list_init(&cmt_lru);
 }
 
 void ctp_init(void)
@@ -366,7 +366,7 @@ void ctp_init(void)
         ctp[i].hash_next = (i != NUM_CTP_BUCKETS-1) ? &ctp[i+1] : NULL;
     }
 
-    ctp_lru_list_init(&_ctp_lru_list);
+    ctp_lru_list_init(&ctp_lru);
 }
 
 void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
@@ -393,13 +393,31 @@ void replace(uint64_t dlpn, uint64_t dppn)
 
         // CMT Hit
         if (_cmt_entry != NULL) {
-            cmt_lru_list_remove(&_cmt_lru_list, _cmt_entry);
-            // free(_cmt_entry);
+            if (_cmt_entry->prev != NULL) {
+                _cmt_entry->prev->next = _cmt_entry->next;
+            }
+
+            else {
+                cmt[_cmt_entry->hash_value].cmt_entries = _cmt_entry->next;
+            }
+            
+            if (_cmt_entry->next != NULL) {
+                _cmt_entry->next->prev = _cmt_entry->prev;
+            }
+
+            else {
+                _cmt_entry->prev->next = NULL;
+            }
+
+            cmt_lru_list_remove(&cmt_lru, _cmt_entry);
+            
+            free(_cmt_entry);
         }
     }
 
+    // CTP Miss
     else {
-
+        struct cmt_entry* _cmt_entry = cmt_find_entry(dlpn);
     }
 }
 
