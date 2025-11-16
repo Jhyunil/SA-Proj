@@ -208,7 +208,7 @@ int delete_minheap(Heaptype* h)
 
 Queuetype* fblk_list;   // free block for Write
 Heaptype* ablk_list;    // active block for GC victim
-BNUM tblk_curr;;        // 현재 할당된 T Block number
+BNUM tblk_curr;         // 현재 할당된 T Block number
 int blk_invalid[BLOCK_LIST_SIZE];  // 각 T Block 별 invalid page 수
 /*** Free T Block List (FIFO Queue) ***/
 
@@ -518,6 +518,109 @@ int is_cache_full(void)
     return (total_curr_bytes + add_bytes > max_bytes);
 }
 
+int is_ctp_full(void)
+{   
+    return ctpn >= MAX_CTPN;
+}
+
+int select_victim_greedy(void)
+{ // delete victim from alist, and return bnum of victim
+	int max_criteria = -1;
+	int target;
+	int vdx = -1;
+
+	int tmp[BLOCK_LIST_SIZE];
+	int tdx = 0;
+	while(ablk_list->heap_size) {
+		tmp[tdx] = delete_minheap(ablk_list);
+
+		if (tmp[tdx] == tblk_curr.bnum) {
+			tdx++;
+			continue;
+		}
+
+		target = blk_invalid[tmp[tdx]];
+		if(max_criteria < target) {
+			vdx = tdx;
+			max_criteria = target;
+		}
+		tdx++;
+	}
+	for(int i = 0; i < tdx; i++) {
+		if(i == vdx) continue;
+		insert_minheap(ablk_list, tmp[i]);
+	}
+
+	if (vdx == -1) {
+		printf("Not found victim\n");
+		return INVALID_PPN;
+	}
+	return tmp[vdx];
+}
+
+void map_garbage_collection(void)
+{
+    int victim = select_victim_greedy();
+	if(victim == INVALID_PPN) {
+		printf("No victim found for GC\n");
+		return;
+	}
+
+	uint64_t ppn_base = victim*NPAGES;
+	uint64_t tvpn, tppn, old_tppn; // lpn은 mapping gc일 경우 mvpn으로 쓰임
+	uint8_t data[PAGE_DATA_SIZE];
+
+	for(int i = 0; i < NPAGES; i++) {
+		old_tppn = ppn_base+i;
+		tvpn = tp2l[old_tppn];
+		if(tvpn == INVALID_PPN || gtd[tvpn].tppn.ppa != old_tppn) continue;
+
+		// valid -> copy
+        // case 1: cached (cmt, ctp)
+        struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
+        int flag = 0;
+
+        if(ctp_curr != NULL && gtd[tvpn].dirty) {
+            memcpy(data, ctp_curr->mp->dppn, PAGE_DATA_SIZE);
+            flag = 1;
+        }
+        
+        tnand_read(0, victim, i, data);
+        uint64_t* data_ptr = (uint64_t*)data;
+        for(int j = 0; j < NUM_MAPPINGS_PER_PAGE; j++) {
+            uint64_t dvpn = tvpn*NUM_MAPPINGS_PER_PAGE + j;
+            // uint64_t dppn = data_ptr[j];
+            struct cmt_entry* cmt_curr = cmt_find_entry(dvpn);
+            if(cmt_curr != NULL && cmt_curr->data.dirty) {
+                data_ptr[j] = cmt_curr->data.dppn.ppa;
+                cmt_curr->data.dirty = false;
+                if (flag == 1) {
+                    femu_log("map gc error! cmt and ctp both dirty bit set\n");        
+                }
+            }
+        }
+
+        // case 2: not cached
+		int blk = tblk_curr.bnum;
+		int page = tblk_curr.p_cur++;
+		int chk = tnand_write(0, blk, page, data);
+		if(chk) printf("write in gc error! : %d\n", chk);
+
+		tppn = blk*NPAGES + page;
+		gtd[tvpn].tppn.ppa = tppn; // location 수정 x
+        gtd[tvpn].dirty = false;
+		tp2l[tppn] = tvpn;
+		tp2l[old_tppn] = INVALID_PPN;
+	}
+
+	int chk = tnand_erase(0, victim);
+	if(!chk) printf("\nerase error!\n");
+	blk_invalid[victim] = 0;
+	enqueue(fblk_list, victim);
+
+	return;
+}
+
 void cmt_evict_entry(void)
 { // evict one entry from CMT
     struct cmt_entry* victim = cmt_lru.tail;
@@ -534,7 +637,7 @@ void cmt_evict_entry(void)
             insert_minheap(ablk_list, tblk_curr.bnum);
 
             if (fblk_list->q_size < 1) { // map gc
-                // map_garbage_collection(bank);
+                map_garbage_collection();
             }
         }
 
@@ -572,7 +675,7 @@ void ctp_evict_entry(void)
             insert_minheap(ablk_list, tblk_curr.bnum);
 
             if (fblk_list->q_size < 1) { // map gc
-                // map_garbage_collection(bank);
+                map_garbage_collection();
             }
         }
 
@@ -590,13 +693,34 @@ void ctp_evict_entry(void)
     ctp_remove_entry(victim); // Erase victim from CTP
 }
 
-void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
+int cached_num(void) {
+    struct cmt_entry* lru_ptr = cmt_lru.head;
+    int entry_num = 0; // number of mapping which is in CTP and CMT
+    while(lru_ptr) {
+        uint64_t tvpn = lru_ptr->data.dlpn / NUM_MAPPINGS_PER_PAGE;
+        if(ctp_find_entry(tvpn)) entry_num++;
+        lru_ptr = lru_ptr->lru_next;
+    }
+
+    return entry_num;
+}
+
+void fetch_in(uint64_t dlpn, uint64_t dppn)
 { // Hyunil : fetch mapping and translation page into CMT and CTP together
     if(is_cache_full()) {
         cmt_evict_entry();                  // evict one entry from CMT for CMT fetch
-        if(cmtn >= NUM_MAPPINGS_PER_PAGE) { // evict N entries from CMT for CTP fetch
+        
+        if(cached_num() >= NUM_MAPPINGS_PER_PAGE) { // evict N entries from CMT for CTP fetch
+            struct cmt_entry* lru_ptr = cmt_lru.head;
             for(int i = 0; i < NUM_MAPPINGS_PER_PAGE; i++) {
-                cmt_evict_entry();
+                uint64_t lru_tvpn = lru_ptr->data.dlpn / NUM_MAPPINGS_PER_PAGE;
+                struct ctp_entry* lru_ctp_entry = ctp_find_entry(lru_tvpn);
+                if(lru_ctp_entry) {
+                    lru_ctp_entry->mp->dppn[lru_ptr->data.dlpn % NUM_MAPPINGS_PER_PAGE] = lru_ptr->data.dppn;
+                    if(!lru_ptr->data.dirty) gtd[lru_tvpn].dirty = true;
+                    cmt_remove_entry(lru_ptr);
+                }
+                lru_ptr = lru_ptr->lru_next;
             }
         } else {                            // evict one entry from CTP for CTP fetch
             ctp_evict_entry();
@@ -605,6 +729,7 @@ void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
     
     // Fetch mapping and tranlsation page into CMT and CTP
     uint64_t dlpn_off = dlpn % NUM_MAPPINGS_PER_PAGE;
+    uint64_t tvpn = dlpn / NUM_MAPPINGS_PER_PAGE;
     uint64_t tppn = gtd[tvpn].tppn.ppa;
     struct ctp_entry* ctp_curr = ctp_creat_entry();
 
@@ -621,6 +746,45 @@ void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
     struct cmt_entry* cmt_curr = cmt_creat_entry();
     cmt_curr->data = (struct data){dlpn, ctp_curr->mp->dppn[dlpn_off], false};
     cmt_insert_entry(cmt_curr); // fetch (dlpn, dppn) into CMT
+    ctp_insert_entry(ctp_curr); // fetch T_demand into CTP
+    gtd[tvpn].location = false; // Update GTD (location)
+}
+
+void ctp_fetch_in(uint64_t dlpn, uint64_t dppn)
+{ // Hyunil : fetch mapping and translation page into CMT and CTP together
+    if(is_cache_full()) {        
+        if(cached_num() >= NUM_MAPPINGS_PER_PAGE) { // evict N entries from CMT for CTP fetch
+            struct cmt_entry* lru_ptr = cmt_lru.head;
+            for(int i = 0; i < NUM_MAPPINGS_PER_PAGE; i++) {
+                uint64_t lru_tvpn = lru_ptr->data.dlpn / NUM_MAPPINGS_PER_PAGE;
+                struct ctp_entry* lru_ctp_entry = ctp_find_entry(lru_tvpn);
+                if(lru_ctp_entry) {
+                    lru_ctp_entry->mp->dppn[lru_ptr->data.dlpn % NUM_MAPPINGS_PER_PAGE] = lru_ptr->data.dppn;
+                    if(!lru_ptr->data.dirty) gtd[lru_tvpn].dirty = true;
+                    cmt_remove_entry(lru_ptr);
+                }
+                lru_ptr = lru_ptr->lru_next;
+            }
+        } else {                            // evict one entry from CTP for CTP fetch
+            ctp_evict_entry();
+        }
+    }
+    
+    // Fetch mapping and tranlsation page into CTP
+    uint64_t tvpn = dlpn / NUM_MAPPINGS_PER_PAGE;
+    uint64_t tppn = gtd[tvpn].tppn.ppa;
+    struct ctp_entry* ctp_curr = ctp_creat_entry();
+
+    ctp_curr->tvpn = tvpn;
+    ctp_curr->mp = malloc(sizeof(struct map_page));
+    ctp_curr->mp->dppn = malloc(sizeof(struct ppa) * NUM_MAPPINGS_PER_PAGE);
+    ctp_curr->tppn.ppa = tppn;
+    if(tppn == INVALID_PPN) {   // 처음 접근하는 tvpn인 경우
+        memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE);
+    } else {                    // 이미 nand에 존재하는 tvpn인 경우 
+        tnand_read(0, tppn / NBLKS, tppn % NPAGES, (void*)ctp_curr->mp->dppn);
+    }
+    
     ctp_insert_entry(ctp_curr); // fetch T_demand into CTP
     gtd[tvpn].location = false; // Update GTD (location)
 }
@@ -645,7 +809,7 @@ void replace(uint64_t dlpn, uint64_t dppn)
             cmt_curr->data.dirty = true;
             cmt_lru_list_move_to_front(&cmt_lru, cmt_curr); // ?
         } else {                // CMT Miss
-            fetch_in(dlpn, dppn, tvpn);
+            ctp_fetch_in(dlpn, dppn);
             ctp_curr = ctp_find_entry(tvpn);
 
             if (ctp_curr == NULL) {

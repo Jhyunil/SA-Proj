@@ -311,6 +311,7 @@ typedef struct {
 
 // gtd, cmt, ctp manipulate functions
 int is_cache_full(void);
+int is_ctp_full(void);
 
 struct cmt_entry* cmt_creat_entry(void);
 struct cmt_entry* cmt_find_entry(uint64_t dlpn);
@@ -341,7 +342,11 @@ void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 
-void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn);
+int select_victim_greedy(void);
+void map_garbage_collection(void);
+int cached_num(void);
+void fetch_in(uint64_t dlpn, uint64_t dppn);
+void ctp_fetch_in(uint64_t dlpn, uint64_t dppn);
 void replace(uint64_t dlpn, uint64_t dppn);
 
 /*** Translation Flash Space ***/
