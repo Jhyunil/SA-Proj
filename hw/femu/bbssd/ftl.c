@@ -1,18 +1,21 @@
 #include "ftl.h"
 
 // FEMU CDFTL
-
-/*** Translation Flash Space ***/
-#define INVALID_PPN 0xFFFFFFFF
+#define INVALID_PPN (-1)
 Page* tnand;
 uint8_t* is_w;
 size_t NBANKS, NBLKS, NPAGES, PAGES_PER_BANK;
 
+uint64_t cmtn; // size of current CMT
+uint64_t ctpn; // size of current CTP
 uint64_t tp2l[MAX_TPPN];
 struct gtd_entry gtd[MAX_TVPN];
 struct cmt_hash cmt[NUM_CMT_BUCKETS];
 struct ctp_hash ctp[NUM_CTP_BUCKETS];
+ctp_lru_list ctp_lru;
+cmt_lru_list cmt_lru;
 
+/*** Translation Flash Space ***/
 int tnand_init(int nbanks, int nblks, int npages)
 {
 	if((nbanks <= 0 || nblks <= 0) || npages <= 0) return NAND_ERR_INVALID;
@@ -112,7 +115,7 @@ Queuetype* create_queue(void)
 
 void init_queue(Queuetype* h)
 {
-	h->cap = 16 + 1;
+	h->cap = BLOCK_LIST_SIZE + 1;
 	h->queue = (int*)malloc(sizeof(int) * h->cap);
 	h->head = 0;
 	h->tail = 0;
@@ -151,8 +154,62 @@ int dequeue(Queuetype* h)
 	h->q_size--;
 	return item;
 }
-Queuetype* fblk_list; // free block for Write
-int blk_invalid[16];  // 각 T Block 별 invalid page 수
+
+Heaptype* create_heap(void)
+{
+	return (Heaptype*)malloc(sizeof(Heaptype));
+}
+
+void init_heap(Heaptype* h)
+{
+	h->heap_size = 0;
+}
+
+void insert_minheap(Heaptype* h, int item)
+{
+	int i;
+	i = ++(h->heap_size);
+
+	while((i != 1) && (item < h->heap[i / 2])) {
+		h->heap[i] = h->heap[i / 2];
+		i /= 2;
+	}
+	h->heap[i] = item;
+}
+
+int delete_minheap(Heaptype* h)
+{
+	if(!h->heap_size) {
+		printf("heap is empty!");
+		return INVALID_PPN;
+	}
+
+	int parent, child;
+	int item, tmp;
+
+	item = h->heap[1];
+	tmp = h->heap[(h->heap_size)--];
+	parent = 1;
+	child = 2;
+
+	while(child <= h->heap_size) {
+		if((child < h->heap_size) && (h->heap[child] > h->heap[child+1])) {
+			child++;
+		}
+		if(tmp <= h->heap[child]) break;
+
+		h->heap[parent] = h->heap[child];
+		parent = child;
+		child *= 2;
+	}
+	h->heap[parent] = tmp;
+	return item;
+}
+
+Queuetype* fblk_list;   // free block for Write
+Heaptype* ablk_list;    // active block for GC victim
+BNUM tblk_curr;;        // 현재 할당된 T Block number
+int blk_invalid[BLOCK_LIST_SIZE];  // 각 T Block 별 invalid page 수
 /*** Free T Block List (FIFO Queue) ***/
 
 /*** cmt LRU 리스트 관련 함수 ***/
@@ -214,19 +271,6 @@ void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry)
     cmt_lru_list_add_to_front(list, entry);
 }
 
-struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list) 
-{
-    if (list->tail == NULL) {
-        // 리스트가 비어있음
-        return NULL;
-    }
-
-    struct cmt_entry *victim = list->tail;
-    cmt_lru_list_remove(list, victim);
-    
-    return victim;
-}
-
 // ctp LRU 리스트 관련 함수
 void ctp_lru_list_init(ctp_lru_list *list) 
 {
@@ -285,20 +329,9 @@ void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry)
     // 2. 리스트의 맨 앞에 다시 추가
     ctp_lru_list_add_to_front(list, entry);
 }
+/*** cmt LRU 리스트 관련 함수 ***/
 
-struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list) 
-{
-    if (list->tail == NULL) {
-        // 리스트가 비어있음
-        return NULL;
-    }
-
-    struct ctp_entry *victim = list->tail;
-    ctp_lru_list_remove(list, victim);
-    
-    return victim;
-}
-
+/*** gtd, cmt, ctp manipulate 함수 ***/
 struct cmt_entry* cmt_find_entry(uint64_t dlpn)
 {
     int hash_key = dlpn % NUM_CMT_BUCKETS;
@@ -352,6 +385,9 @@ void cmt_init(void)
         cmt[i].cmt_entries = NULL;
         cmt[i].hash_next = (i != NUM_CMT_BUCKETS-1) ? &cmt[i+1] : NULL;
     }
+
+    cmt_lru_list_init(&cmt_lru);
+    cmtn = 0;
 }
 
 void ctp_init(void)
@@ -361,19 +397,268 @@ void ctp_init(void)
         ctp[i].ctp_entries = NULL;
         ctp[i].hash_next = (i != NUM_CTP_BUCKETS-1) ? &ctp[i+1] : NULL;
     }
+
+    ctp_lru_list_init(&ctp_lru);
+    ctpn = 0;
+}
+
+struct cmt_entry* cmt_creat_entry(void)
+{
+    struct cmt_entry* new_entry = (struct cmt_entry*)malloc(sizeof(struct cmt_entry));
+    
+    new_entry->data.dlpn = INVALID_PPN;
+    new_entry->data.dppn.ppa = INVALID_PPN;
+    new_entry->data.dirty = false;
+
+    new_entry->prev = NULL;
+    new_entry->next = NULL; 
+    new_entry->lru_prev = NULL; 
+    new_entry->lru_next = NULL;
+
+    return new_entry;
+}
+
+struct ctp_entry* ctp_creat_entry(void)
+{
+    struct ctp_entry* new_entry = (struct ctp_entry*)malloc(sizeof(struct ctp_entry));
+    new_entry->tvpn = INVALID_PPN;
+    new_entry->mp = NULL;
+    new_entry->tppn.ppa = INVALID_PPN;
+    new_entry->prev = NULL;
+    new_entry->next = NULL; 
+    new_entry->lru_prev = NULL; 
+    new_entry->lru_next = NULL;
+
+    return new_entry;
+}
+
+void cmt_insert_entry(struct cmt_entry *new_entry)
+{
+    int hash_key = new_entry->data.dlpn % NUM_CMT_BUCKETS;
+
+    // 해시 테이블에 삽입
+    new_entry->next = cmt[hash_key].cmt_entries;
+    if (cmt[hash_key].cmt_entries != NULL) {
+        cmt[hash_key].cmt_entries->prev = new_entry;
+    }
+    cmt[hash_key].cmt_entries = new_entry;
+    new_entry->prev = NULL;
+
+    // LRU 리스트에 삽입
+    cmt_lru_list_add_to_front(&cmt_lru, new_entry);
+    cmtn++;
+}
+
+void ctp_insert_entry(struct ctp_entry *new_entry)
+{
+    int hash_key = new_entry->tvpn % NUM_CTP_BUCKETS;
+
+    // 해시 테이블에 삽입
+    new_entry->next = ctp[hash_key].ctp_entries;
+    if (ctp[hash_key].ctp_entries != NULL) {
+        ctp[hash_key].ctp_entries->prev = new_entry;
+    }
+    ctp[hash_key].ctp_entries = new_entry;
+    new_entry->prev = NULL;
+
+    // LRU 리스트에 삽입
+    ctp_lru_list_add_to_front(&ctp_lru, new_entry);
+    ctpn++;
+}
+
+void cmt_remove_entry(struct cmt_entry *entry)
+{
+    int hash_key = entry->data.dlpn % NUM_CMT_BUCKETS;
+
+    // 해시 테이블에서 제거
+    if (entry->prev != NULL) {
+        entry->prev->next = entry->next;
+    } else {
+        cmt[hash_key].cmt_entries = entry->next;
+    }
+    if (entry->next != NULL) {
+        entry->next->prev = entry->prev;
+    }
+
+    // LRU 리스트에서 제거
+    cmt_lru_list_remove(&cmt_lru, entry);
+
+    free(entry);
+    cmtn--;
+}
+
+void ctp_remove_entry(struct ctp_entry *entry)
+{
+    int hash_key = entry->tvpn % NUM_CTP_BUCKETS;
+
+    // 해시 테이블에서 제거
+    if (entry->prev != NULL) {
+        entry->prev->next = entry->next;
+    } else {
+        ctp[hash_key].ctp_entries = entry->next;
+    }
+    if (entry->next != NULL) {
+        entry->next->prev = entry->prev;
+    }
+
+    // LRU 리스트에서 제거
+    ctp_lru_list_remove(&ctp_lru, entry);
+
+    free(entry->mp->dppn);
+    free(entry->mp);
+    free(entry);
+    ctpn--;
+}
+
+int is_cache_full(void)
+{   
+    uint64_t total_curr_bytes = cmtn * sizeof(struct cmt_entry) + ctpn * sizeof(struct ctp_entry) + ctpn * PAGE_DATA_SIZE;
+    uint64_t max_bytes = MAX_CMTN * sizeof(struct cmt_entry) + MAX_CTPN * sizeof(struct ctp_entry) + MAX_CTPN * PAGE_DATA_SIZE;
+    uint64_t add_bytes = sizeof(struct cmt_entry) + sizeof(struct ctp_entry) + PAGE_DATA_SIZE;
+    return (total_curr_bytes + add_bytes > max_bytes);
+}
+
+void cmt_evict_entry(void)
+{ // evict one entry from CMT
+    struct cmt_entry* victim = cmt_lru.tail;
+    struct ctp_entry* victim_ctp_entry = NULL;
+    uint64_t victim_dlpn = victim->data.dlpn;
+    uint64_t victim_tvpn = victim_dlpn / NUM_MAPPINGS_PER_PAGE;
+
+    if((victim_ctp_entry = ctp_find_entry(victim_tvpn)) != NULL) { // Flush back victim to CTP
+        victim_ctp_entry->mp->dppn[victim_dlpn % NUM_MAPPINGS_PER_PAGE] = victim->data.dppn;
+        if(!victim->data.dirty) gtd[victim_tvpn].dirty = true;
+    } else if(victim->data.dirty) { // Flush to nand
+        if(tblk_curr.p_cur >= NPAGES) {
+            tblk_curr = (BNUM){dequeue(fblk_list), 0};
+            insert_minheap(ablk_list, tblk_curr.bnum);
+
+            if (fblk_list->q_size < 1) { // map gc
+                // map_garbage_collection(bank);
+            }
+        }
+
+        uint64_t victim_tppn = gtd[victim_tvpn].tppn.ppa;
+        uint8_t* mapping_page = malloc(PAGE_DATA_SIZE);
+        if(victim_tppn == INVALID_PPN) {    // 처음 접근하는 tvpn인 경우
+            memset(mapping_page, 0xFF, PAGE_DATA_SIZE);
+        } else {                            // 이미 nand에 존재하는 tvpn인 경우 
+            tnand_read(0, victim_tppn / NBLKS, victim_tppn % NPAGES, (void*)mapping_page);
+            tp2l[victim_tppn] = INVALID_PPN;
+        }
+
+        uint64_t blk = tblk_curr.bnum;
+        uint64_t page = tblk_curr.p_cur++;
+        uint64_t new_tppn = (blk * NPAGES) + page;
+        
+        tnand_write(0, blk, page, (void*)mapping_page);
+        gtd[victim_tvpn].tppn.ppa = new_tppn;
+        gtd[victim_tvpn].location = true;
+        gtd[victim_tvpn].dirty = false;
+        tp2l[new_tppn] = victim_tvpn;
+    }
+    cmt_remove_entry(victim); // Erase victim from CMT
+}
+
+void ctp_evict_entry(void)
+{ // evict one entry from CTP
+    struct ctp_entry* victim = ctp_lru.tail;
+    uint64_t victim_tvpn = victim->tvpn;
+    uint64_t victim_tppn = victim->tppn.ppa;
+
+    if(gtd[victim_tvpn].dirty) { // Flush to nand
+        if(tblk_curr.p_cur >= NPAGES) {
+            tblk_curr = (BNUM){dequeue(fblk_list), 0};
+            insert_minheap(ablk_list, tblk_curr.bnum);
+
+            if (fblk_list->q_size < 1) { // map gc
+                // map_garbage_collection(bank);
+            }
+        }
+
+        uint64_t blk = tblk_curr.bnum;
+        uint64_t page = tblk_curr.p_cur++;
+        uint64_t new_tppn = (blk * NPAGES) + page;
+        
+        tnand_write(0, blk, page, (void*)victim->mp->dppn);
+        gtd[victim_tvpn].tppn.ppa = new_tppn;
+        gtd[victim_tvpn].location = true;
+        gtd[victim_tvpn].dirty = false;
+        tp2l[victim_tppn] = INVALID_PPN;
+        tp2l[new_tppn] = victim_tvpn;
+    }
+    ctp_remove_entry(victim); // Erase victim from CTP
 }
 
 void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn)
-{ // Hyunil
+{ // Hyunil : fetch mapping and translation page into CMT and CTP together
+    if(is_cache_full()) {
+        cmt_evict_entry();                  // evict one entry from CMT for CMT fetch
+        if(cmtn >= NUM_MAPPINGS_PER_PAGE) { // evict N entries from CMT for CTP fetch
+            for(int i = 0; i < NUM_MAPPINGS_PER_PAGE; i++) {
+                cmt_evict_entry();
+            }
+        } else {                            // evict one entry from CTP for CTP fetch
+            ctp_evict_entry();
+        }
+    }
+    
+    // Fetch mapping and tranlsation page into CMT and CTP
+    uint64_t dlpn_off = dlpn % NUM_MAPPINGS_PER_PAGE;
+    uint64_t tppn = gtd[tvpn].tppn.ppa;
+    struct ctp_entry* ctp_curr = ctp_creat_entry();
 
+    ctp_curr->tvpn = tvpn;
+    ctp_curr->mp = malloc(sizeof(struct map_page));
+    ctp_curr->mp->dppn = malloc(sizeof(struct ppa) * NUM_MAPPINGS_PER_PAGE);
+    ctp_curr->tppn.ppa = tppn;
+    if(tppn == INVALID_PPN) {   // 처음 접근하는 tvpn인 경우
+        memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE);
+    } else {                    // 이미 nand에 존재하는 tvpn인 경우 
+        tnand_read(0, tppn / NBLKS, tppn % NPAGES, (void*)ctp_curr->mp->dppn);
+    }
+    
+    struct cmt_entry* cmt_curr = cmt_creat_entry();
+    cmt_curr->data = (struct data){dlpn, ctp_curr->mp->dppn[dlpn_off], false};
+    cmt_insert_entry(cmt_curr); // fetch (dlpn, dppn) into CMT
+    ctp_insert_entry(ctp_curr); // fetch T_demand into CTP
+    gtd[tvpn].location = false; // Update GTD (location)
 }
 
 void replace(uint64_t dlpn, uint64_t dppn)
-{ // Donghyun
+{ // Donghyun : replace mapping entry in CMT/CTP with (dlpn, dppn)
+    uint64_t tvpn = dlpn / NUM_MAPPINGS_PER_PAGE;
+    uint64_t dlpn_off = dlpn % NUM_MAPPINGS_PER_PAGE;
+    struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
+    struct cmt_entry* cmt_curr = cmt_find_entry(dlpn);
 
+    if (ctp_curr != NULL) {     // CTP Hit
+        ctp_curr->mp->dppn[dlpn_off].ppa = dppn;
+        ctp_lru_list_move_to_front(&ctp_lru, ctp_curr); // ?
+
+        if (cmt_curr != NULL) { // CMT Hit
+            cmt_remove_entry(cmt_curr);
+        }
+    } else {                    // CTP Miss        
+        if (cmt_curr != NULL) { // CMT Hit
+            cmt_curr->data.dppn.ppa = dppn;
+            cmt_curr->data.dirty = true;
+            cmt_lru_list_move_to_front(&cmt_lru, cmt_curr); // ?
+        } else {                // CMT Miss
+            fetch_in(dlpn, dppn, tvpn);
+            ctp_curr = ctp_find_entry(tvpn);
+
+            if (ctp_curr == NULL) {
+                femu_log("CTP entry fetch failed!\n");
+            }
+            ctp_curr->mp->dppn[dlpn_off].ppa = dppn;
+            ctp_lru_list_move_to_front(&ctp_lru, ctp_curr); // ?
+        }
+    }
+    
+    gtd[tvpn].dirty = true; // Update GTD (dirty)
 }
-
-/*** cmt LRU 리스트 관련 함수 ***/
+/*** gtd, cmt, ctp manipulate 함수 ***/
 
 //#define FEMU_DEBUG_FTL
 
@@ -773,12 +1058,18 @@ void ssd_init(FemuCtrl *n)
     // Translation Space Allocation
     spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
     tnand_init(1, 16, spp->pgs_per_blk);
+
+    ablk_list = create_heap(); // Active Mapping Block List (Min-Heap)
+    init_heap(ablk_list);
     fblk_list = create_queue(); // Free Translation Block List (FIFO)
     init_queue(fblk_list);
     for(int j = 0; j < 16; j++) {
         enqueue(fblk_list, j);
         blk_invalid[j] = 0;
 	}
+    tblk_curr = (BNUM){dequeue(fblk_list), 0}; // Current Translation Block
+    insert_minheap(ablk_list, tblk_curr.bnum);
+
     // Translation Metadata Allocation
     tinit();
 }

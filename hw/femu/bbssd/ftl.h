@@ -299,14 +299,30 @@ typedef struct {
 } ctp_lru_list;
 
 // gtd, cmt, ctp
-#define MAX_TPPN 3072
+#define PAGE_DATA_SIZE 4096
+#define NUM_MAPPINGS_PER_PAGE (PAGE_DATA_SIZE / sizeof(struct ppa))
+#define MAX_TPPN 4096
 #define MAX_TVPN 3072
+#define MAX_CMTN 1024   // entry하나 당 8B
+#define MAX_CTPN 32     // entry하나 당 4096B
 #define NUM_CMT_BUCKETS 10
 #define NUM_CTP_BUCKETS 5
+#define BLOCK_LIST_SIZE 16
 
 // gtd, cmt, ctp manipulate functions
+int is_cache_full(void);
+
+struct cmt_entry* cmt_creat_entry(void);
 struct cmt_entry* cmt_find_entry(uint64_t dlpn);
+void cmt_insert_entry(struct cmt_entry *new_entry);
+void cmt_remove_entry(struct cmt_entry *entry);
+void cmt_evict_entry(void);
+
+struct ctp_entry* ctp_creat_entry(void);
 struct ctp_entry* ctp_find_entry(uint64_t tvpn);
+void ctp_insert_entry(struct ctp_entry *new_entry);
+void ctp_remove_entry(struct ctp_entry *entry);
+void ctp_evict_entry(void);
 
 void tinit(void);
 void gtd_init(void);
@@ -318,21 +334,17 @@ void cmt_lru_list_init(cmt_lru_list *list);
 void cmt_lru_list_remove(cmt_lru_list *list, struct cmt_entry *entry);
 void cmt_lru_list_add_to_front(cmt_lru_list *list, struct cmt_entry *entry);
 void cmt_lru_list_move_to_front(cmt_lru_list *list, struct cmt_entry *entry);
-struct cmt_entry* cmt_lru_list_evict_tail(cmt_lru_list *list);
-
 
 // CTP LRU List Functions
 void ctp_lru_list_init(ctp_lru_list *list);
 void ctp_lru_list_remove(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_add_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry);
-struct ctp_entry* ctp_lru_list_evict_tail(ctp_lru_list *list);
 
 void fetch_in(uint64_t dlpn, uint64_t dppn, uint64_t tvpn);
 void replace(uint64_t dlpn, uint64_t dppn);
 
 /*** Translation Flash Space ***/
-#define PAGE_DATA_SIZE 4096
 /* function prototypes */
 int tnand_init(int nbanks, int nblks, int npages);
 int tnand_read(int bank, int blk, int page, void *data);
@@ -356,7 +368,7 @@ typedef struct {
 	int head;       // front
 	int tail;       // rear
 	int cap;        // buffer capacity
-	int q_size;  // current size
+	int q_size;     // current size
 } Queuetype;
 Queuetype* create_queue(void);
 void init_queue(Queuetype* h);
@@ -364,3 +376,18 @@ int is_full(const Queuetype* h);
 int is_empty(const Queuetype* h);
 void enqueue(Queuetype* h, int item);
 int dequeue(Queuetype* h);
+
+/*** Active T Block List (Min Heap) ***/
+typedef struct {
+	int heap[BLOCK_LIST_SIZE+1];
+	int heap_size;
+} Heaptype;
+Heaptype* create_heap(void);
+void init_heap(Heaptype* h);
+void insert_minheap(Heaptype* h, int item);
+int delete_minheap(Heaptype* h);
+
+typedef struct {
+	uint64_t bnum; // block number
+	uint64_t p_cur; // page cursor
+} BNUM;
