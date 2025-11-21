@@ -345,8 +345,8 @@ void ctp_lru_list_move_to_front(ctp_lru_list *list, struct ctp_entry *entry);
 int select_victim_greedy(void);
 void map_garbage_collection(void);
 int cached_num(void);
-void fetch_in(uint64_t dlpn, uint64_t dppn);
-void ctp_fetch_in(uint64_t dlpn, uint64_t dppn);
+void fetch_in(uint64_t dlpn);
+void ctp_fetch_in(uint64_t dlpn);
 void replace(uint64_t dlpn, uint64_t dppn);
 
 /*** Translation Flash Space ***/
