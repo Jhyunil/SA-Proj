@@ -841,12 +841,37 @@ static inline bool should_gc_high(struct ssd *ssd)
 static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
     return ssd->maptbl[lpn];
+
+    uint64_t tvpn = lpn / NUM_MAPPINGS_PER_PAGE;
+    struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
+    if(ctp_curr != NULL) {
+        return ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE];
+    }
+    
+    struct cmt_entry* cmt_curr = cmt_find_entry(lpn);
+    if(cmt_curr != NULL) {
+        return cmt_curr->data.dppn;
+    }
+
+    fetch_in(lpn, ssd->maptbl[lpn].ppa);
+    
+
+
+    // check
+    struct ppa dppn = get_maptbl_ent(ssd, lpn);
+    if(ssd->maptbl[lpn].ppa != dppn.ppa) {
+        femu_log("map table fetch error! lpn: %lu, maptbl: %lu, fetched: %lu\n", lpn, ssd->maptbl[lpn].ppa, dppn.ppa);
+    }
+    return dppn;
 }
 
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = *ppa;
+
+    // replace, fetch_in
+    // replace(lpn, ppa->ppa);
 }
 
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
