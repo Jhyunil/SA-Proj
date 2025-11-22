@@ -7,6 +7,8 @@
         "compare": "c",
         "cstdint": "c",
         "format": "c",
-        "*.code": "c"
+        "*.code": "c",
+        "string": "c",
+        "chrono": "c"
     }
 }
