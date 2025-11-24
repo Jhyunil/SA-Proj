@@ -315,6 +315,9 @@ typedef struct {
 #define NUM_CTP_BUCKETS 5
 #define BLOCK_LIST_SIZE 16
 
+// bucket for batch gc
+void set_maptbl_batchgc(struct ssd *ssd);
+
 // gtd, cmt, ctp manipulate functions
 int is_cache_full(void);
 int is_ctp_full(void);

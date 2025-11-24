@@ -1,0 +1,130 @@
+17a18,34
+> // struct _Bucket Bucket;
+> typedef struct _Bucket {
+> 	uint64_t mvpn;
+> 	uint64_t mapping;
+> 	uint64_t ppn;
+> 	struct _Bucket* next;
+> } Bucket;
+> 
+> struct _MvpnBucket{
+> 	Bucket* gc_copy_list[256+1];
+> 	uint64_t exist[NUM_MAPPINGS_PER_PAGE]; // list의 idx 저장
+> 	uint64_t bucket_size;
+> 	uint64_t pool_idx;
+> };
+> Bucket bucket_pool[256]; // NPAGES_PER_BLK 크기
+> struct _MvpnBucket MvpnBucket;
+> 
+582d598
+<         int flag = 0;
+586d601
+<             flag = 1;
+604,608d618
+<                 
+<                 if (flag == 1) {
+<                     femu_log("[ERROR] map gc error! cmt and ctp both dirty bit set\n");
+<                     ftl_assert(0);       
+<                 }
+715c725
+<     uint64_t victim_tppn = gtd[victim_tvpn].tppn.ppa; // victim->tppn.ppa;
+---
+>     uint64_t victim_tppn = gtd[victim_tvpn].tppn.ppa;
+1034a1045,1105
+> void set_maptbl_batchgc(struct ssd *ssd)
+> {
+> 	for(int i = 1; i <= MvpnBucket.bucket_size; i++) {
+> 		if(tblk_curr.p_cur >= NPAGES) {
+>             // femu_log("curr blk : %lu, cur : %lu\n", tblk_curr.bnum, tblk_curr.p_cur);
+> 
+>             tblk_curr = (BNUM){dequeue(fblk_list), 0};
+>             insert_minheap(ablk_list, tblk_curr.bnum);
+>             // femu_log("new blk : %lu, cur : %lu\n", tblk_curr.bnum, tblk_curr.p_cur);
+> 
+>             if (fblk_list->q_size < 1) { // map gc
+>                 map_garbage_collection();
+>             }
+>         }
+> 
+> 		Bucket* curr = MvpnBucket.gc_copy_list[i];
+> 		uint64_t mvpn = curr->mvpn;
+> 		uint64_t old_mppn = gtd[mvpn].tppn.ppa;
+> 		uint64_t data[NUM_MAPPINGS_PER_PAGE];
+> 
+> 		if (old_mppn != INVALID_PPN) {
+> 			uint64_t old_blk = old_mppn / NPAGES;
+> 			uint64_t old_page = old_mppn % NPAGES;
+> 			tp2l[old_mppn] = INVALID_PPN;
+> 			blk_invalid[old_blk]++;
+> 			tnand_read(0, old_blk, old_page, data);
+> 		} else memset(data, 0xff, PAGE_DATA_SIZE);
+> 
+> 	
+>         uint64_t lpn = curr->mapping;
+>         uint64_t tvpn = lpn / NUM_MAPPINGS_PER_PAGE;
+>         struct cmt_entry* cmt_curr = cmt_find_entry(lpn);
+>         struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
+>         if(cmt_curr != NULL) {
+>             cmt_curr->data.dppn.ppa = curr->ppn;
+>             cmt_curr->data.dirty = true;
+>             continue;
+>         } else if(ctp_curr != NULL) {
+>             ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE].ppa = curr->ppn;
+>             gtd[tvpn].dirty = true; 
+>             continue;
+>         } else {
+> 			while (curr) {
+> 				data[lpn % NUM_MAPPINGS_PER_PAGE] = curr->ppn;
+> 				curr = curr->next;
+> 			}
+> 		}
+>         
+> 
+> 		uint64_t blk = tblk_curr.bnum;
+> 		uint64_t page = tblk_curr.p_cur++;
+> 		uint64_t mppn = blk*NPAGES + page;
+> 		gtd[mvpn].tppn.ppa = mppn;
+> 		tp2l[mppn] = mvpn;
+> 
+> 		int chk = tnand_write(0, blk, page, data);
+> 		if(chk) printf("map write error! %d\n", chk);
+> 	}
+> 	for(int i = 1; i <= MvpnBucket.bucket_size; i++) MvpnBucket.exist[MvpnBucket.gc_copy_list[i]->mvpn] = 0;
+> }
+> 
+1742a1814
+>     
+1743a1816,1831
+>     // batch Maptbl update in datagc
+>     uint64_t mvpn = lpn / NUM_MAPPINGS_PER_PAGE;
+> 	uint64_t mapping = lpn;
+>     uint64_t idx = MvpnBucket.pool_idx++;
+>     uint64_t key;
+>     if(!MvpnBucket.exist[mvpn])	MvpnBucket.exist[mvpn] = ++MvpnBucket.bucket_size;
+>     key = MvpnBucket.exist[mvpn];
+>     bucket_pool[idx] = (Bucket){mvpn, mapping, new_ppa.ppa};
+>     bucket_pool[idx].next = NULL;
+>     Bucket* tail = MvpnBucket.gc_copy_list[key];
+>     if (!tail) MvpnBucket.gc_copy_list[key] = &bucket_pool[idx];
+>     else {
+>         while (tail->next) tail = tail->next;
+>         tail->next = &bucket_pool[idx];
+>     }
+>     
+1804a1893,1896
+>     MvpnBucket.bucket_size = 0;
+> 	MvpnBucket.pool_idx = 0;
+> 	for(int i = 1; i <= NPAGES; i++) MvpnBucket.gc_copy_list[i] = NULL;
+> 
+1806c1898
+<         ppa->g.pg = pg;
+---
+>         ppa->g.pg = pg; // old ppa
+1819a1912,1913
+>     // set_maptbl_batchgc(ssd);
+> 
+2118c2212
+< }
+\ No newline at end of file
+---
+> }
