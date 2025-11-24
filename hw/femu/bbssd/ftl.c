@@ -616,12 +616,12 @@ void map_garbage_collection(void)
 		if(chk) printf("write in gc error! : %d\n", chk);
 
 		tppn = blk*NPAGES + page;
+        if(ctp_curr != NULL) ctp_curr->tppn.ppa = tppn;
 		gtd[tvpn].tppn.ppa = tppn; // location 수정 x
         // femu_log("gtd edit 1! tvpn : %lu, tppon : %lu\n", tvpn, gtd[tvpn].tppn.ppa);
         gtd[tvpn].dirty = false;
 		tp2l[tppn] = tvpn;
 		tp2l[old_tppn] = INVALID_PPN;
-        blk_invalid[old_tppn / NPAGES] = 0;
 	}
 
 	int chk = tnand_erase(0, victim);
@@ -648,11 +648,11 @@ void cmt_evict_entry(void)
     uint64_t victim_tvpn = victim_dlpn / NUM_MAPPINGS_PER_PAGE;
 
     if((victim_ctp_entry = ctp_find_entry(victim_tvpn)) != NULL) { // Flush back victim to CTP
-        victim_ctp_entry->mp->dppn[victim_dlpn % NUM_MAPPINGS_PER_PAGE] = victim->data.dppn;
         if(victim->data.dirty) {
+            victim_ctp_entry->mp->dppn[victim_dlpn % NUM_MAPPINGS_PER_PAGE] = victim->data.dppn;
             gtd[victim_tvpn].dirty = true;
-            femu_log("[Error] dirty CMT flush to CTP1\n");
-            ftl_assert(0);
+            // femu_log("[Error] dirty CMT flush to CTP1\n");
+            // ftl_assert(0);
         }
     } else if(victim->data.dirty) { // Flush to nand
         if(tblk_curr.p_cur >= NPAGES) {
@@ -809,10 +809,9 @@ void fetch_in(uint64_t dlpn)
     ctp_curr->mp = malloc(sizeof(struct map_page));
     ctp_curr->mp->dppn = malloc(sizeof(struct ppa) * NUM_MAPPINGS_PER_PAGE);
     ctp_curr->tppn.ppa = tppn;
-    if(tppn == INVALID_PPN) {   // 처음 접근하는 tvpn인 경우
-        // femu_log("Before memset fetch_in\n");
-        memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE);
-    } else {                    // 이미 nand에 존재하는 tvpn인 경우 
+    
+    memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE); // 이미 nand에 존재하는 tvpn인 경우 
+    if(tppn != INVALID_PPN) {
         // femu_log("Before Read CTP entry fetch_in\n");
         int chk = tnand_read(0, tppn / NPAGES, tppn % NPAGES, (void*)ctp_curr->mp->dppn);
         if(chk) {
@@ -820,8 +819,17 @@ void fetch_in(uint64_t dlpn)
             // femu_log("GTD location: %d, dirty: %d\n", gtd[tvpn].location, gtd[tvpn].dirty);
         }
         // femu_log("Read CTP entry from NAND fetch_in\n");
+
+        uint64_t base_lpn = tvpn * NUM_MAPPINGS_PER_PAGE;
+        for (int i = 0; i < NUM_MAPPINGS_PER_PAGE; i++) {
+            struct cmt_entry* dirty_cmt = cmt_find_entry(base_lpn + i);
+            if (dirty_cmt != NULL && dirty_cmt->data.dirty) {
+                ctp_curr->mp->dppn[i] = dirty_cmt->data.dppn;
+                gtd[tvpn].dirty = true;
+            }
+        }
     }
-    
+        
     struct cmt_entry* cmt_curr = cmt_creat_entry();
     cmt_curr->data = (struct data){dlpn, ctp_curr->mp->dppn[dlpn_off], false};
 
@@ -868,13 +876,21 @@ void ctp_fetch_in(uint64_t dlpn)
     ctp_curr->tvpn = tvpn;
     ctp_curr->mp = malloc(sizeof(struct map_page));
     ctp_curr->mp->dppn = malloc(sizeof(struct ppa) * NUM_MAPPINGS_PER_PAGE);
-    ctp_curr->tppn.ppa = tppn;
-    if(tppn == INVALID_PPN) {   // 처음 접근하는 tvpn인 경우
-        memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE);
-    } else {                    // 이미 nand에 존재하는 tvpn인 경우 
-        int chk =tnand_read(0, tppn / NPAGES, tppn % NPAGES, (void*)ctp_curr->mp->dppn);
+    memset(ctp_curr->mp->dppn, 0xFF, PAGE_DATA_SIZE); // 이미 nand에 존재하는 tvpn인 경우 
+    if(tppn != INVALID_PPN) {
+        int chk = tnand_read(0, tppn / NPAGES, tppn % NPAGES, (void*)ctp_curr->mp->dppn);
         if(chk) {
-            femu_log("[ERROR] CTP fetch_in tnand_read error!2\n");
+            femu_log("[ERROR] CTP fetch_in tnand_read error!1, error: %d, tvpn : %lu, tppn : %lu\n", chk, tvpn, tppn);
+            // femu_log("GTD location: %d, dirty: %d\n", gtd[tvpn].location, gtd[tvpn].dirty);
+        }
+
+        uint64_t base_lpn = tvpn * NUM_MAPPINGS_PER_PAGE;
+        for (int i = 0; i < NUM_MAPPINGS_PER_PAGE; i++) {
+            struct cmt_entry* dirty_cmt = cmt_find_entry(base_lpn + i);
+            if (dirty_cmt != NULL && dirty_cmt->data.dirty) {
+                ctp_curr->mp->dppn[i] = dirty_cmt->data.dppn;
+                gtd[tvpn].dirty = true;
+            }
         }
     }
     
