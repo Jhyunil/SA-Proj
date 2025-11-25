@@ -18,19 +18,20 @@ struct ssd* global_ssd;
 
 // struct _Bucket Bucket;
 typedef struct _Bucket {
-	uint64_t tvpn;
-	uint64_t mapping;
-	uint64_t ppn;
+	// uint64_t tvpn;
+	uint64_t dlpn;
+	uint64_t dppn;
 	struct _Bucket* next;
 } Bucket;
 
 struct _TvpnBucket{
-	Bucket* gc_copy_list[256+1];
+	Bucket* gc_copy_list[MAX_TVPN+1];
 	uint64_t exist[MAX_TVPN]; // 특정 tvpn에 대한 gc_copy_list의 idx
 	uint64_t bucket_size;
 	uint64_t pool_idx;
 };
-Bucket bucket_pool[256]; // NPAGES_PER_BLK 크기
+// pages per superblock : 4 * 8 * 256 = 8192
+Bucket bucket_pool[256]; // NPAGES_PER_BLK (pages per superblock) 크기
 struct _TvpnBucket TvpnBucket;
 
 /*** Translation Flash Space ***/
@@ -1061,7 +1062,7 @@ void set_maptbl_batchgc(struct ssd *ssd)
         }
 
 		Bucket* curr = TvpnBucket.gc_copy_list[i];
-		uint64_t tvpn = curr->tvpn;
+		uint64_t tvpn = curr->dlpn / NUM_MAPPINGS_PER_PAGE;
 		uint64_t old_tppn = gtd[tvpn].tppn.ppa;
 		uint64_t data[NUM_MAPPINGS_PER_PAGE];
 
@@ -1077,17 +1078,17 @@ void set_maptbl_batchgc(struct ssd *ssd)
         int write_flag = 0;
         struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
         while (curr) {
-            uint64_t lpn = curr->mapping;
+            uint64_t lpn = curr->dlpn;
             struct cmt_entry* cmt_curr = cmt_find_entry(lpn);
 
             if(cmt_curr != NULL) {
-                cmt_curr->data.dppn.ppa = curr->ppn;
+                cmt_curr->data.dppn.ppa = curr->dppn;
                 cmt_curr->data.dirty = true;
             } else if(ctp_curr != NULL) {
-                ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE].ppa = curr->ppn;
+                ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE].ppa = curr->dppn;
                 gtd[tvpn].dirty = true;
             } else {
-                data[lpn % NUM_MAPPINGS_PER_PAGE] = curr->ppn;
+                data[lpn % NUM_MAPPINGS_PER_PAGE] = curr->dppn;
                 write_flag = 1;
             }
             curr = curr->next;
@@ -1106,7 +1107,7 @@ void set_maptbl_batchgc(struct ssd *ssd)
             gtd[tvpn].tppn.ppa = INVALID_PPN;
         }
 	}
-	for(int i = 1; i <= TvpnBucket.bucket_size; i++) TvpnBucket.exist[TvpnBucket.gc_copy_list[i]->tvpn] = 0;
+	for(int i = 1; i <= TvpnBucket.bucket_size; i++) TvpnBucket.exist[(TvpnBucket.gc_copy_list[i]->dlpn) / NUM_MAPPINGS_PER_PAGE] = 0;
 }
 
 static inline void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
@@ -1828,12 +1829,12 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     ssd->maptbl[lpn] = new_ppa;
     // batch Maptbl update in datagc
     uint64_t tvpn = lpn / NUM_MAPPINGS_PER_PAGE;
-	uint64_t mapping = lpn;
+	uint64_t dlpn = lpn;
     uint64_t idx = TvpnBucket.pool_idx++;
     uint64_t key;
     if(!TvpnBucket.exist[tvpn])	TvpnBucket.exist[tvpn] = ++TvpnBucket.bucket_size;
     key = TvpnBucket.exist[tvpn];
-    bucket_pool[idx] = (Bucket){tvpn, mapping, new_ppa.ppa};
+    bucket_pool[idx] = (Bucket){dlpn, new_ppa.ppa};
     bucket_pool[idx].next = NULL;
     Bucket* tail = TvpnBucket.gc_copy_list[key];
     if (!tail) TvpnBucket.gc_copy_list[key] = &bucket_pool[idx];
@@ -1905,7 +1906,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
 
     TvpnBucket.bucket_size = 0;
 	TvpnBucket.pool_idx = 0;
-	for(int i = 1; i <= NPAGES; i++) TvpnBucket.gc_copy_list[i] = NULL;
+	for(int i = 1; i <= MAX_TVPN; i++) TvpnBucket.gc_copy_list[i] = NULL;
 
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
         ppa->g.pg = pg; // old ppa
@@ -1922,7 +1923,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         }
     }
 
-    // set_maptbl_batchgc(ssd);
+    set_maptbl_batchgc(ssd);
 
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 }
@@ -1957,6 +1958,10 @@ static int do_gc(struct ssd *ssd, bool force)
               ssd->lm.free_line_cnt);
 
     /* copy back valid data */
+    // TvpnBucket.bucket_size = 0;
+	// TvpnBucket.pool_idx = 0;
+	// for(int i = 1; i <= MAX_TVPN; i++) TvpnBucket.gc_copy_list[i] = NULL;
+
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
             ppa.g.ch = ch;
@@ -1977,6 +1982,8 @@ static int do_gc(struct ssd *ssd, bool force)
             lunp->gc_endtime = lunp->next_lun_avail_time;
         }
     }
+
+    // set_maptbl_batchgc(ssd);
 
     /* update line status */
     mark_line_free(ssd, &ppa);

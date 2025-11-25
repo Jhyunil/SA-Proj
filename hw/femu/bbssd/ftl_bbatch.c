@@ -14,6 +14,24 @@ struct cmt_hash cmt[NUM_CMT_BUCKETS];
 struct ctp_hash ctp[NUM_CTP_BUCKETS];
 ctp_lru_list ctp_lru;
 cmt_lru_list cmt_lru;
+struct ssd* global_ssd;
+
+// struct _Bucket Bucket;
+typedef struct _Bucket {
+	uint64_t tvpn;
+	uint64_t mapping;
+	uint64_t ppn;
+	struct _Bucket* next;
+} Bucket;
+
+struct _TvpnBucket{
+	Bucket* gc_copy_list[256+1];
+	uint64_t exist[MAX_TVPN]; // 특정 tvpn에 대한 gc_copy_list의 idx
+	uint64_t bucket_size;
+	uint64_t pool_idx;
+};
+Bucket bucket_pool[256]; // NPAGES_PER_BLK 크기
+struct _TvpnBucket TvpnBucket;
 
 /*** Translation Flash Space ***/
 int tnand_init(int nbanks, int nblks, int npages)
@@ -48,6 +66,7 @@ int tnand_init(int nbanks, int nblks, int npages)
 
 int tnand_write(int bank, int blk, int page, void *data)
 {
+    global_ssd->tnand_writes_cnt++;
 	int flag_bk, flag_bl, flag_pg; 
 	flag_bk = flag_bl = flag_pg = 0;
 	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
@@ -69,6 +88,7 @@ int tnand_write(int bank, int blk, int page, void *data)
 
 int tnand_read(int bank, int blk, int page, void *data)
 {
+    global_ssd->tnand_reads_cnt++;
 	int flag_bk, flag_bl, flag_pg;
 	flag_bk = flag_bl = flag_pg = 0;
 	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
@@ -568,7 +588,7 @@ void map_garbage_collection(void)
 	}
 
 	uint64_t ppn_base = victim*NPAGES;
-	uint64_t tvpn, tppn, old_tppn; // lpn은 mapping gc일 경우 mvpn으로 쓰임
+	uint64_t tvpn, tppn, old_tppn; // lpn은 mapping gc일 경우 tvpn으로 쓰임
 	uint8_t data[PAGE_DATA_SIZE];
 
 	for(int i = 0; i < NPAGES; i++) {
@@ -705,7 +725,7 @@ void ctp_evict_entry(void)
         return;
     }
     uint64_t victim_tvpn = victim->tvpn;
-    uint64_t victim_tppn = gtd[victim_tvpn].tppn.ppa; // victim->tppn.ppa;
+    uint64_t victim_tppn = gtd[victim_tvpn].tppn.ppa;
 
     if(gtd[victim_tvpn].dirty) { // Flush to nand
         if(tblk_curr.p_cur >= NPAGES) {
@@ -1025,10 +1045,74 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
     replace(lpn, ppa->ppa);
 }
 
+void set_maptbl_batchgc(struct ssd *ssd)
+{
+	for(int i = 1; i <= TvpnBucket.bucket_size; i++) {
+		if(tblk_curr.p_cur >= NPAGES) {
+            // femu_log("curr blk : %lu, cur : %lu\n", tblk_curr.bnum, tblk_curr.p_cur);
+
+            tblk_curr = (BNUM){dequeue(fblk_list), 0};
+            insert_minheap(ablk_list, tblk_curr.bnum);
+            // femu_log("new blk : %lu, cur : %lu\n", tblk_curr.bnum, tblk_curr.p_cur);
+
+            if (fblk_list->q_size < 1) { // map gc
+                map_garbage_collection();
+            }
+        }
+
+		Bucket* curr = TvpnBucket.gc_copy_list[i];
+		uint64_t tvpn = curr->tvpn;
+		uint64_t old_tppn = gtd[tvpn].tppn.ppa;
+		uint64_t data[NUM_MAPPINGS_PER_PAGE];
+
+		if (old_tppn != INVALID_PPN) {
+			uint64_t old_blk = old_tppn / NPAGES;
+			uint64_t old_page = old_tppn % NPAGES;
+			tp2l[old_tppn] = INVALID_PPN;
+			blk_invalid[old_blk]++;
+			tnand_read(0, old_blk, old_page, data);
+		} else memset(data, 0xff, PAGE_DATA_SIZE);
+
+	
+        int write_flag = 0;
+        struct ctp_entry* ctp_curr = ctp_find_entry(tvpn);
+        while (curr) {
+            uint64_t lpn = curr->mapping;
+            struct cmt_entry* cmt_curr = cmt_find_entry(lpn);
+
+            if(cmt_curr != NULL) {
+                cmt_curr->data.dppn.ppa = curr->ppn;
+                cmt_curr->data.dirty = true;
+            } else if(ctp_curr != NULL) {
+                ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE].ppa = curr->ppn;
+                gtd[tvpn].dirty = true;
+            } else {
+                data[lpn % NUM_MAPPINGS_PER_PAGE] = curr->ppn;
+                write_flag = 1;
+            }
+            curr = curr->next;
+        }
+        
+        if(write_flag) {
+            uint64_t blk = tblk_curr.bnum;
+            uint64_t page = tblk_curr.p_cur++;
+            uint64_t tppn = blk*NPAGES + page;
+            gtd[tvpn].tppn.ppa = tppn;
+            tp2l[tppn] = tvpn;
+
+            int chk = tnand_write(0, blk, page, data);
+		    if(chk) printf("map write error! %d\n", chk);
+        } else {
+            gtd[tvpn].tppn.ppa = INVALID_PPN;
+        }
+	}
+	for(int i = 1; i <= TvpnBucket.bucket_size; i++) TvpnBucket.exist[TvpnBucket.gc_copy_list[i]->tvpn] = 0;
+}
+
 static inline void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
-    ftl_assert(lpn < ssd->sp.tt_pgs);
-    ssd->maptbl[lpn] = *ppa;
+    // ftl_assert(lpn < ssd->sp.tt_pgs);
+    // ssd->maptbl[lpn] = *ppa;
 
     // replace, fetch_in
     uint64_t tvpn = lpn / NUM_MAPPINGS_PER_PAGE;
@@ -1429,6 +1513,7 @@ static void ssd_init_rmap(struct ssd *ssd)
 void ssd_init(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;
+    global_ssd = ssd;
     struct ssdparams *spp = &ssd->sp;
 
     ftl_assert(ssd);
@@ -1466,6 +1551,10 @@ void ssd_init(FemuCtrl *n)
     ssd->ctp_hits = 0; 
     ssd->cache_misses = 0;
     ssd->total_requests = 0;
+
+    // tnand read, write counter init
+    ssd->tnand_reads_cnt = 0;
+    ssd->tnand_writes_cnt = 0;
 
     // Translation Space Allocation
     spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
@@ -1731,9 +1820,28 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
     /* update maptbl */
-    // set_maptbl_ent(ssd, lpn, &new_ppa);
+    set_maptbl_ent(ssd, lpn, &new_ppa);
     // femu_log("[Data GC valid copy mapping] LPN %lu: PPA 0x%lx -> 0x%lx\n", lpn, old_ppa->ppa, new_ppa.ppa);
-    set_maptbl_datagc(ssd, lpn, &new_ppa);
+    
+    // set_maptbl_datagc(ssd, lpn, &new_ppa);
+    ftl_assert(lpn < ssd->sp.tt_pgs);
+    ssd->maptbl[lpn] = new_ppa;
+    // batch Maptbl update in datagc
+    uint64_t tvpn = lpn / NUM_MAPPINGS_PER_PAGE;
+	uint64_t mapping = lpn;
+    uint64_t idx = TvpnBucket.pool_idx++;
+    uint64_t key;
+    if(!TvpnBucket.exist[tvpn])	TvpnBucket.exist[tvpn] = ++TvpnBucket.bucket_size;
+    key = TvpnBucket.exist[tvpn];
+    bucket_pool[idx] = (Bucket){tvpn, mapping, new_ppa.ppa};
+    bucket_pool[idx].next = NULL;
+    Bucket* tail = TvpnBucket.gc_copy_list[key];
+    if (!tail) TvpnBucket.gc_copy_list[key] = &bucket_pool[idx];
+    else {
+        while (tail->next) tail = tail->next;
+        tail->next = &bucket_pool[idx];
+    }
+    
     // struct ppa tmp = get_maptbl_ent(ssd,lpn);
     // femu_log("[Data GC valid copy mapping] LPN: %lu, get: 0x%lx, correct: 0x%lx\n", lpn, tmp.ppa, new_ppa.ppa);
     /* update rmap */
@@ -1795,8 +1903,12 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
     struct nand_page *pg_iter = NULL;
     int cnt = 0;
 
+    TvpnBucket.bucket_size = 0;
+	TvpnBucket.pool_idx = 0;
+	for(int i = 1; i <= NPAGES; i++) TvpnBucket.gc_copy_list[i] = NULL;
+
     for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
-        ppa->g.pg = pg;
+        ppa->g.pg = pg; // old ppa
         pg_iter = get_pg(ssd, ppa);
         /* there shouldn't be any free page in victim blocks */
         ftl_assert(pg_iter->status != PG_FREE);
@@ -1809,6 +1921,8 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
             cnt++;
         }
     }
+
+    // set_maptbl_batchgc(ssd);
 
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 }
