@@ -225,6 +225,7 @@ struct ssd {
     // tnand_read, tnand_write counts
     uint64_t        tnand_reads_cnt;
     uint64_t        tnand_writes_cnt;
+    uint64_t        tnand_writes_gc;
 };
 
 void ssd_init(FemuCtrl *n);

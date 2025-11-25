@@ -1102,6 +1102,7 @@ void set_maptbl_batchgc(struct ssd *ssd)
             tp2l[tppn] = tvpn;
 
             int chk = tnand_write(0, blk, page, data);
+            ssd->tnand_writes_gc++;
 		    if(chk) printf("map write error! %d\n", chk);
         } else {
             gtd[tvpn].tppn.ppa = INVALID_PPN;
@@ -1556,6 +1557,7 @@ void ssd_init(FemuCtrl *n)
     // tnand read, write counter init
     ssd->tnand_reads_cnt = 0;
     ssd->tnand_writes_cnt = 0;
+    ssd->tnand_writes_gc = 0;
 
     // Translation Space Allocation
     spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
