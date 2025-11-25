@@ -14,6 +14,7 @@ struct cmt_hash cmt[NUM_CMT_BUCKETS];
 struct ctp_hash ctp[NUM_CTP_BUCKETS];
 ctp_lru_list ctp_lru;
 cmt_lru_list cmt_lru;
+struct ssd* global_ssd;
 
 // struct _Bucket Bucket;
 typedef struct _Bucket {
@@ -65,6 +66,7 @@ int tnand_init(int nbanks, int nblks, int npages)
 
 int tnand_write(int bank, int blk, int page, void *data)
 {
+    global_ssd->tnand_writes_cnt++;
 	int flag_bk, flag_bl, flag_pg; 
 	flag_bk = flag_bl = flag_pg = 0;
 	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
@@ -86,6 +88,7 @@ int tnand_write(int bank, int blk, int page, void *data)
 
 int tnand_read(int bank, int blk, int page, void *data)
 {
+    global_ssd->tnand_reads_cnt++;
 	int flag_bk, flag_bl, flag_pg;
 	flag_bk = flag_bl = flag_pg = 0;
 	size_t flat_idx = (bank * (PAGES_PER_BANK)) + (blk * (NPAGES)) + page; // page idx
@@ -1076,12 +1079,13 @@ void set_maptbl_batchgc(struct ssd *ssd)
         while (curr) {
             uint64_t lpn = curr->mapping;
             struct cmt_entry* cmt_curr = cmt_find_entry(lpn);
+
             if(cmt_curr != NULL) {
                 cmt_curr->data.dppn.ppa = curr->ppn;
                 cmt_curr->data.dirty = true;
             } else if(ctp_curr != NULL) {
                 ctp_curr->mp->dppn[lpn % NUM_MAPPINGS_PER_PAGE].ppa = curr->ppn;
-                gtd[tvpn].dirty = true; 
+                gtd[tvpn].dirty = true;
             } else {
                 data[lpn % NUM_MAPPINGS_PER_PAGE] = curr->ppn;
                 write_flag = 1;
@@ -1509,6 +1513,7 @@ static void ssd_init_rmap(struct ssd *ssd)
 void ssd_init(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;
+    global_ssd = ssd;
     struct ssdparams *spp = &ssd->sp;
 
     ftl_assert(ssd);
@@ -1546,6 +1551,10 @@ void ssd_init(FemuCtrl *n)
     ssd->ctp_hits = 0; 
     ssd->cache_misses = 0;
     ssd->total_requests = 0;
+
+    // tnand read, write counter init
+    ssd->tnand_reads_cnt = 0;
+    ssd->tnand_writes_cnt = 0;
 
     // Translation Space Allocation
     spp->tspace_size = 4096 * 16 * spp->pgs_per_blk; // 4096B * 16 blocks * pages_per_block
@@ -1811,7 +1820,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     ftl_assert(valid_lpn(ssd, lpn));
     new_ppa = get_new_page(ssd);
     /* update maptbl */
-    // set_maptbl_ent(ssd, lpn, &new_ppa);
+    set_maptbl_ent(ssd, lpn, &new_ppa);
     // femu_log("[Data GC valid copy mapping] LPN %lu: PPA 0x%lx -> 0x%lx\n", lpn, old_ppa->ppa, new_ppa.ppa);
     
     // set_maptbl_datagc(ssd, lpn, &new_ppa);
@@ -1913,7 +1922,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         }
     }
 
-    set_maptbl_batchgc(ssd);
+    // set_maptbl_batchgc(ssd);
 
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 }

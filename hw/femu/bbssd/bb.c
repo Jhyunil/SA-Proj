@@ -107,7 +107,8 @@ static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     struct ssd* ssd = n->ssd;
-    uint64_t waf = nvme_write_amplification(ssd->host_writes, ssd->gc_writes);
+
+    uint64_t waf = nvme_write_amplification(ssd->host_writes, ssd->gc_writes, ssd->tnand_writes_cnt);
     // femu_log("tspace_size: %d\n",ssd->sp.tspace_size);
     // femu_log("waf : %ld\n", waf);
 
@@ -126,9 +127,12 @@ static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
     double cmt_hit_rate = 100 * ((double)cmt_hits / (total_requests ? total_requests : 1));
     double ctp_hit_rate = 100 * ((double)ctp_hits / (total_requests ? total_requests : 1));
     double cache_miss_rate = 100 * ((double)cache_misses / (total_requests ? total_requests : 1));
-    femu_log("Cache Hit Rate Log: \nCMT Hits=%lu, \nCTP Hits=%lu, \nCache Misses=%lu, \nTotal Requests=%lu, \nCMT Hit Rate=%.2lf%%, \nCTP Hit Rate=%.2lf%%, \nCache Miss Rate=%.2lf%%\n",
+    femu_log("Cache Hit Rate Log: \r\nCMT Hits=%lu, \r\nCTP Hits=%lu, \r\nCache Misses=%lu, \r\nTotal Requests=%lu, \r\nCMT Hit Rate=%.2lf%%, \r\nCTP Hit Rate=%.2lf%%, \r\nCache Miss Rate=%.2lf%%\r\n",
             cmt_hits, ctp_hits, cache_misses, total_requests,
             cmt_hit_rate, ctp_hit_rate, cache_miss_rate);
+
+    femu_log("tnand_read count : %lu\r\n", ssd->tnand_reads_cnt);
+    femu_log("tnand_write count : %lu\r\n", ssd->tnand_writes_cnt);
 
     return NVME_SUCCESS;
 }

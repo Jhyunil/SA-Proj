@@ -221,6 +221,10 @@ struct ssd {
     uint64_t        ctp_hits;
     uint64_t        cache_misses;
     uint64_t        total_requests;
+
+    // tnand_read, tnand_write counts
+    uint64_t        tnand_reads_cnt;
+    uint64_t        tnand_writes_cnt;
 };
 
 void ssd_init(FemuCtrl *n);

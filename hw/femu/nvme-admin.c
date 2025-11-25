@@ -1131,10 +1131,10 @@ void nvme_process_sq_admin(void *opaque)
     }
 }
 
-uint64_t nvme_write_amplification(uint64_t host_writes, uint64_t gc_writes)
+uint64_t nvme_write_amplification(uint64_t host_writes, uint64_t gc_writes, uint64_t tnand_writes)
 {
     uint64_t waf;
-    waf = (uint64_t)(100 * ((double)(host_writes + gc_writes) / host_writes));
+    waf = (uint64_t)(100 * ((double)(host_writes + gc_writes + tnand_writes) / host_writes));
 
     return waf;
 }
