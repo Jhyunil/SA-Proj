@@ -133,6 +133,7 @@ static uint16_t bb_get_log(FemuCtrl *n, NvmeCmd *cmd)
 
     femu_log("tnand_read count : %lu\r\n", ssd->tnand_reads_cnt);
     femu_log("tnand_write count : %lu\r\n", ssd->tnand_writes_cnt);
+    femu_log("tnand_write_gc count : %lu\r\n", ssd->tnand_writes_gc);
 
     return NVME_SUCCESS;
 }
