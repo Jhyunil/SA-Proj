@@ -1113,7 +1113,7 @@ void set_maptbl_batchgc(struct ssd *ssd)
 	for(int i = 1; i <= TvpnBucket.bucket_size; i++) TvpnBucket.exist[(TvpnBucket.gc_copy_list[i]->dlpn) / NUM_MAPPINGS_PER_PAGE] = 0;
 }
 
-static inline void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
+void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     // ftl_assert(lpn < ssd->sp.tt_pgs);
     // ssd->maptbl[lpn] = *ppa;

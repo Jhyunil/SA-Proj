@@ -320,6 +320,8 @@ typedef struct {
 #define NUM_CTP_BUCKETS 5
 #define BLOCK_LIST_SIZE 16
 
+// linear valid page copy on Data GC
+void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *ppa);
 // bucket for batch gc
 void set_maptbl_batchgc(struct ssd *ssd);
 
