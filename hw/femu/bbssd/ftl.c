@@ -1103,7 +1103,9 @@ void set_maptbl_batchgc(struct ssd *ssd)
 
             int chk = tnand_write(0, blk, page, data);
             ssd->tnand_writes_gc++;
-		    if(chk) printf("map write error! %d\n", chk);
+		    if(chk) {
+                femu_log("[ERROR] CTP evict tnand_write error!3\n");
+            }
         } else {
             gtd[tvpn].tppn.ppa = INVALID_PPN;
         }
@@ -1163,6 +1165,7 @@ static inline void set_maptbl_datagc(struct ssd *ssd, uint64_t lpn, struct ppa *
             uint64_t* m = (uint64_t*)mapping_page;
             m[lpn % NUM_MAPPINGS_PER_PAGE] = ppa->ppa;
             int chk = tnand_write(0, blk, page, (void*)mapping_page);
+            ssd->tnand_writes_gc++;
             if(chk) {
                 femu_log("[ERROR] CTP evict tnand_write error!3\n");
             }
@@ -1826,7 +1829,7 @@ static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
     set_maptbl_ent(ssd, lpn, &new_ppa);
     // femu_log("[Data GC valid copy mapping] LPN %lu: PPA 0x%lx -> 0x%lx\n", lpn, old_ppa->ppa, new_ppa.ppa);
     
-    // set_maptbl_datagc(ssd, lpn, &new_ppa);
+    set_maptbl_datagc(ssd, lpn, &new_ppa);
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = new_ppa;
     // batch Maptbl update in datagc
@@ -1925,7 +1928,7 @@ static void clean_one_block(struct ssd *ssd, struct ppa *ppa)
         }
     }
 
-    set_maptbl_batchgc(ssd);
+    // set_maptbl_batchgc(ssd);
 
     ftl_assert(get_blk(ssd, ppa)->vpc == cnt);
 }
